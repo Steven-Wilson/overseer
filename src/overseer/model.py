@@ -1,5 +1,14 @@
 """Data contract between agent-invoked CLI commands and the TUI.
 
+Two layers:
+
+* `Source` — raw material as it exists upstream (currently: one git commit,
+  split into `Hunk`s). Immutable once ingested; hunks are addressed by id
+  (`<source id>:<1-based index>`).
+* `Change` — a human-sized unit of review. It references hunks (possibly from
+  several sources) and carries the explanation. A large or multi-purpose commit
+  is decomposed into several `Change`s by an agent via `overseer-cli plan`.
+
 Nothing here may import textual.
 """
 
@@ -27,18 +36,50 @@ class Hunk:
 
 
 @dataclass
+class Source:
+    id: str
+    message: str  # full commit message
+    hunks: list[Hunk] = field(default_factory=list)
+    seq: int = 0  # ingest order; drives display order of changes
+
+    @property
+    def title(self) -> str:
+        return self.message.splitlines()[0] if self.message else self.id
+
+    def hunk_id(self, index: int) -> str:
+        """`index` is 0-based; the id is 1-based to match what agents see."""
+        return f"{self.id}:{index + 1}"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Source:
+        data = dict(data)
+        data["hunks"] = [Hunk(**h) for h in data.get("hunks", [])]
+        return cls(**data)
+
+
+def split_hunk_id(hunk_id: str) -> tuple[str, int]:
+    """`abc1234:3` -> (`abc1234`, 2). Raises ValueError if malformed."""
+    source_id, sep, num = hunk_id.rpartition(":")
+    if not sep or not source_id or not num.isdigit() or int(num) < 1:
+        raise ValueError(f"malformed hunk id {hunk_id!r}")
+    return source_id, int(num) - 1
+
+
+@dataclass
 class Change:
     id: str
     title: str
-    message: str = ""  # full commit message
-    hunks: list[Hunk] = field(default_factory=list)
+    hunk_ids: list[str] = field(default_factory=list)  # review order
     answers: dict[str, str] = field(default_factory=dict)
+    planned: bool = False  # False = default 1:1 wrapper, not yet decomposed
+    position: int = 0  # index within its plan
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> Change:
-        data = dict(data)
-        data["hunks"] = [Hunk(**h) for h in data.get("hunks", [])]
         return cls(**data)

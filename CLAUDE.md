@@ -34,10 +34,19 @@ These eight questions are the product's requirements; design features against th
 
 TUI framework is **Textual** (async, handles long-running sessions, has a headless `run_test()` pilot for tests).
 
-- `overseer/model.py` — `Change` dataclass and `QUESTIONS` (the README's eight questions, keyed by short id). This is the data contract between CLI and TUI.
-- `overseer/store.py` — file-backed store, one JSON file per change in `$OVERSEER_DIR` (default `./.overseer/changes/`), written atomically.
-- `overseer/gitdiff.py` — shells out to `git` to turn a commit into a `Change`: commit message plus `Hunk`s (one per `@@` block; binary/mode-only/empty files become a line-less hunk with a note). `overseer-cli ingest [REV|A..B]` runs it, one change per commit (ids are 7-char shas); re-ingesting preserves recorded answers.
-- `overseer/cli.py` — `overseer-cli`, headless commands agents run to record/list changes. Must never import `textual` or `overseer.tui`.
-- `overseer/tui/` — Textual app (`overseer`). Reads only from the store and polls it (agents write while it's open), so it must tolerate the store changing underneath it. Selection is tracked by change id (not list index) so refreshes don't jump. Detail text is rendered as `rich.text.Text`, never markup — diffs contain `[...]`. Keys: `n`/`p` step hunks.
+Two-layer data model (`overseer/model.py`, the contract between CLI and TUI):
+
+- **`Source`** — raw ingested material: currently one git commit (message + `Hunk`s). Hunks are addressed `<7-char sha>:<1-based n>`. Immutable once ingested.
+- **`Change`** — the human-sized review unit. References hunk ids (possibly spanning sources), carries `answers` to the eight `QUESTIONS`. Ingest creates one default `Change` per commit (`planned=False`, shown as "whole commit"); decomposing replaces it with several (`planned=True`, ids `<sha>-NN`).
+
+Modules:
+
+- `store.py` — `$OVERSEER_DIR` (default `./.overseer/`): `sources/*.json`, `changes/*.json`, atomic writes. `Store.changes()` orders by source ingest `seq`, then plan `position`. `resolve_hunks` skips dangling ids so a stale store can't crash the viewer.
+- `gitdiff.py` — shells out to `git`, parses `git show` output into a `Source`. `--context N` sets `-U` (finer hunks).
+- `planning.py` — `apply_plan` validates a decomposition plan. Strict by design: every hunk of every touched source must be assigned exactly once, so a plan can reorganise review but never hide code; validation failure writes nothing.
+- `cli.py` — `overseer-cli` (`ingest`, `show`, `plan`, `record`, `list`), the headless interface agents use. Must never import `textual` or `overseer.tui`.
+- `tui/` — Textual app (`overseer`). Reads only from the store and polls it (agents write while it's open), so it must tolerate the store changing underneath it. Selection is tracked by change id, not list index. Detail text is `rich.text.Text`, never markup — diffs contain `[...]`. Keys: `n`/`p` step hunks.
+
+Decomposition is done by an LLM, not by code: `.claude/skills/overseer-decompose/SKILL.md` tells an agent how to read sources (`show`), group hunks, and submit a plan. Keep the skill and the CLI's plan format/commands in sync when changing either.
 
 The CLI writes, the TUI reads; keep that one-way coupling through `model`/`store`.

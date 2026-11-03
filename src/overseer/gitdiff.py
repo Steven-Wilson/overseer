@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import subprocess
 
-from overseer.model import Change, Hunk
+from overseer.model import Hunk, Source
 
 
 class GitError(RuntimeError):
@@ -70,21 +70,23 @@ def parse_patch(patch: str) -> list[Hunk]:
     return hunks
 
 
-def commit_to_change(sha: str, cwd: str | None = None) -> Change:
+def commit_to_source(sha: str, cwd: str | None = None, context: int = 3) -> Source:
+    """`context` is git's -U: fewer context lines means hunks split more finely."""
     full = _git("rev-parse", "--verify", f"{sha}^{{commit}}", cwd=cwd).strip()
     message = _git("show", "-s", "--format=%B", full, cwd=cwd).strip()
     # --no-renames keeps each file's hunks self-describing; -m is not used, so
     # merge commits show no diff.
     patch = _git(
-        "show", "--format=", "--patch", "--no-color", "--no-renames", full, cwd=cwd
+        "show",
+        "--format=",
+        "--patch",
+        "--no-color",
+        "--no-renames",
+        f"-U{context}",
+        full,
+        cwd=cwd,
     )
-    title = message.splitlines()[0] if message else full[:7]
-    return Change(
-        id=full[:7],
-        title=title,
-        message=message,
-        hunks=parse_patch(patch),
-    )
+    return Source(id=full[:7], message=message, hunks=parse_patch(patch))
 
 
 def resolve_commits(rev: str, cwd: str | None = None) -> list[str]:
