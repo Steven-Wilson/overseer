@@ -28,22 +28,21 @@ def append_note(out: Text, note: Note, where: str) -> None:
     done = note.status == "addressed"
     out.append("✓ " if done else "✎ ", style="green" if done else "bold yellow")
     out.append(f"{note.id} {where}: ", style="dim")
-    out.append(f"{note.text}\n", style="dim" if done else "")
+    out.append(f"{note.text}\n")
     if note.reply:
         out.append(f"    agent: {note.reply}\n", style="italic cyan")
 
 
-def note_count(change: Change, notes: list[Note]) -> int:
-    """Open notes on the change itself or any of its hunks."""
-    return sum(
-        1
+def note_count(change: Change, notes: list[Note]) -> tuple[int, int]:
+    """(open, addressed) notes on the change itself or any of its hunks."""
+    mine = [
+        n
         for n in notes
-        if n.status == "open"
-        and (
-            (n.kind == "change" and n.ref == change.id)
-            or (n.kind == "hunk" and n.ref in change.hunk_ids)
-        )
-    )
+        if (n.kind == "change" and n.ref == change.id)
+        or (n.kind == "hunk" and n.ref in change.hunk_ids)
+    ]
+    opened = sum(1 for n in mine if n.status == "open")
+    return opened, len(mine) - opened
 
 
 def render_change(
@@ -281,8 +280,11 @@ class OverseerApp(App):
         label.append(change.title)
         if not change.planned:
             label.append(" (whole commit)", style="dim yellow")
-        if n := note_count(change, self._notes):
-            label.append(f" ✎{n}", style="bold yellow")
+        opened, addressed = note_count(change, self._notes)
+        if opened:
+            label.append(f" ✎{opened}", style="bold yellow")
+        if addressed:  # resolved notes stay visible, just quieter
+            label.append(f" ✓{addressed}", style="green")
         return label
 
     def _current(self) -> Change | None:

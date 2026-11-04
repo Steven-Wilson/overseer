@@ -160,3 +160,19 @@ async def test_note_keys_without_changes_do_nothing(tmp_path, key):
         await pilot.pause()
         await pilot.press(key)
         assert not app.query_one("#note-input").has_class("open")
+
+
+async def test_addressed_notes_stay_visible(tmp_path):
+    store = Store(tmp_path, "pr")
+    seed(store)
+    store.save_note(Note("n1", "hunk", "s1:1", "q", status="addressed", reply="a"))
+    store.save_note(Note("n2", "change", "s1-01", "open one"))
+    app = OverseerApp(store)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        label = str(app.query("#changes Static").first().render())
+        assert "✎1" in label and "✓1" in label
+        store.save_note(Note("n2", "change", "s1-01", "open one", status="addressed"))
+        await app.action_refresh()
+        label = str(app.query("#changes Static").first().render())
+        assert "✎" not in label and "✓2" in label

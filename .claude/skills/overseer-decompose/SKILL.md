@@ -27,7 +27,11 @@ For a PR, fetch it so the range resolves (e.g. `gh pr checkout` or `git fetch or
    - tests go with the behavior they cover unless large;
    - order changes so each makes sense after the previous one; order hunks within a change the same way;
    - a small commit may stay a single change. Do not split for its own sake.
-5. **Explain** each change via `answers`. Valid keys: `mechanical`, `semantic`, `why`, `impact`, `behavior`, `patterns`, `refactor`, `coverage` (the eight review questions). Include only answers you can support from the code and commit message; do not guess intent. For `why`, say so when the commit message gives no reason. Use `patterns`/`refactor` to flag duplication of existing code you actually found. Keep each answer to a few sentences.
+5. **Explain** each change via `answers`. Valid keys: `mechanical`, `semantic`, `why`, `impact`, `behavior`, `patterns`, `refactor`, `coverage` (the eight review questions). Include only answers you can support from the code and commit message; do not guess intent. For `why`, say so when the commit message gives no reason. Use `patterns`/`refactor` to flag duplication of existing code you actually found. Keep each answer to one or two sentences.
+   **Scale commentary to risk** (so rate risk, step 7, first): the reviewer's attention is the scarce resource, and an unanswered question is fine. Do not answer all eight by default; omit any question whose answer is obvious from the title, the diff, or another answer.
+   - `green`: almost nothing, often a single short `mechanical` or `why`, or no answers at all.
+   - `yellow`: only the answers that explain *why it is not green* or that the reviewer needs to judge it (typically `semantic`, `coverage`, `impact`; two to four answers).
+   - `red`: the fullest, still short; cover what makes it red and what to check.
 6. **Link related code** so the reviewer can jump straight to what matters. Links are shown in the TUI and opened in `$EDITOR` on Enter. Per change (`related`) or, when it concerns one hunk specifically, per hunk (`hunk_related`, keyed by hunk id, which must belong to that change). Look for:
    - **consumers**: callers/importers of any function, type or format whose behavior or signature changed (grep or LSP; do not guess);
    - **tests** that cover (or should cover) the change;
