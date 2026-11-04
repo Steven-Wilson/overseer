@@ -51,6 +51,15 @@ class Hunk:
 
 
 @dataclass
+class Link:
+    """Pointer into the working tree that helps a reviewer judge a change."""
+
+    path: str  # relative to the repo root (where the TUI is launched)
+    line: int | None = None  # 1-based
+    note: str = ""  # why it is related, a few words
+
+
+@dataclass
 class Source:
     id: str
     message: str  # full commit message
@@ -92,6 +101,8 @@ class Change:
     planned: bool = False  # False = default 1:1 wrapper, not yet decomposed
     risk: str = ""  # a key of RISKS; "" = not yet rated
     risk_reason: str = ""  # required for yellow/red
+    links: list[Link] = field(default_factory=list)  # related to the whole change
+    hunk_links: dict[str, list[Link]] = field(default_factory=dict)  # by hunk id
     position: int = 0  # index within its plan
 
     def to_dict(self) -> dict:
@@ -99,4 +110,9 @@ class Change:
 
     @classmethod
     def from_dict(cls, data: dict) -> Change:
+        data = dict(data)
+        data["links"] = [Link(**x) for x in data.get("links", [])]
+        data["hunk_links"] = {
+            h: [Link(**x) for x in xs] for h, xs in data.get("hunk_links", {}).items()
+        }
         return cls(**data)

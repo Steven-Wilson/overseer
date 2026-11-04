@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, VerticalScroll
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, ListItem, ListView, Static
 
-from overseer.model import QUESTIONS, RISKS, Change, Hunk, Source
+from overseer.editor import build_command, is_gui, resolve_editor
+from overseer.model import QUESTIONS, RISKS, Change, Hunk, Link, Source
 from overseer.store import Store, resolve_hunks
 
 POLL_SECONDS = 1.0
@@ -60,17 +65,43 @@ def render_change(
     return out
 
 
+class VimList(ListView):
+    BINDINGS = [
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+    ]
+
+
+class LinkItem(ListItem):
+    def __init__(self, link: Link) -> None:
+        label = Text()
+        label.append(link.path + (f":{link.line}" if link.line else ""), style="bold")
+        if link.note:
+            label.append(f"  {link.note}", style="dim")
+        if not Path(link.path).exists():
+            label.append("  (not found)", style="dim red")
+        super().__init__(Static(label))
+        self.link = link
+
+
 class OverseerApp(App):
     TITLE = "Overseer"
     CSS = """
-    #changes { width: 35%; min-width: 24; border-right: solid $primary; }
-    #detail-pane { width: 1fr; padding: 0 1; }
+    #changes { width: 35%; min-width: 24; border: round $panel; }
+    #right { width: 1fr; }
+    #detail-pane { height: 1fr; padding: 0 1; }
+    #links { height: auto; max-height: 40%; border: round $panel; }
+    #changes:focus, #links:focus { border: round $accent; }
     """
     BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("r", "refresh", "Refresh"),
-        ("n", "next_hunk", "Next hunk"),
-        ("p", "prev_hunk", "Prev hunk"),
+        Binding("q", "quit", "Quit"),
+        Binding("r", "refresh", "Refresh"),
+        Binding("h", "pane('left')", "Changes"),
+        Binding("l", "pane('right')", "Related code"),
+        Binding("right_square_bracket", "step_hunk(1)", "Next hunk", key_display="]"),
+        Binding("left_square_bracket", "step_hunk(-1)", "Prev hunk", key_display="["),
+        Binding("ctrl+d", "scroll_detail(1)", "Scroll down", show=False),
+        Binding("ctrl+u", "scroll_detail(-1)", "Scroll up", show=False),
     ]
 
     def __init__(self, store: Store | None = None) -> None:
@@ -80,17 +111,24 @@ class OverseerApp(App):
         self._sources: dict[str, Source] = {}
         self._selected: str | None = None  # change id, stable across refreshes
         self._hunk = 0
+        self._shown_rows: list | None = None  # what the links list was built from
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal():
-            yield ListView(id="changes")
-            with VerticalScroll(id="detail-pane"):
-                yield Static(id="detail")
+            yield VimList(id="changes")
+            with Vertical(id="right"):
+                pane = VerticalScroll(Static(id="detail"), id="detail-pane")
+                pane.can_focus = False  # scrolled with ctrl+d/ctrl+u instead
+                yield pane
+                yield VimList(id="links")
         yield Footer()
 
     async def on_mount(self) -> None:
+        self.query_one("#changes").border_title = "Changes"
+        self.query_one("#links").border_title = "Related code"
         await self.action_refresh()
+        self.query_one("#changes").focus()
         # Agents write while the TUI is open, so poll rather than load once.
         self.set_interval(POLL_SECONDS, self.action_refresh)
 
@@ -111,7 +149,7 @@ class OverseerApp(App):
             view.index = ids.index(self._selected)
         elif changes:
             view.index = 0
-        self._show()
+        await self._show()
 
     @staticmethod
     def _label(change: Change) -> Text:
@@ -131,7 +169,25 @@ class OverseerApp(App):
                 return c
         return None
 
-    def _show(self) -> None:
+    def _link_rows(self) -> list[tuple[str, str | Link]]:
+        """Related code for the current hunk, then for the whole change."""
+        change = self._current()
+        if not change:
+            return []
+        rows: list[tuple[str, str | Link]] = []
+        hunks = resolve_hunks(change, self._sources)
+        if hunks:
+            source, idx, hunk = hunks[max(0, min(self._hunk, len(hunks) - 1))]
+            for_hunk = change.hunk_links.get(source.hunk_id(idx), [])
+            if for_hunk:
+                rows.append(("head", f"This hunk · {hunk.path}"))
+                rows += [("link", link) for link in for_hunk]
+        if change.links:
+            rows.append(("head", "This change"))
+            rows += [("link", link) for link in change.links]
+        return rows
+
+    async def _show(self) -> None:
         change = self._current()
         detail = self.query_one("#detail", Static)
         if change:
@@ -139,8 +195,36 @@ class OverseerApp(App):
             detail.update(render_change(change, hunks, self._hunk))
         else:
             detail.update("")
+        await self._sync_links()
 
-    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+    async def _sync_links(self) -> None:
+        rows = self._link_rows()
+        if rows == self._shown_rows:  # keep the cursor put while polling
+            return
+        self._shown_rows = rows
+        view = self.query_one("#links", ListView)
+        await view.clear()
+        items: list[ListItem] = []
+        for kind, value in rows:
+            if kind == "head":
+                items.append(
+                    ListItem(Static(Text(str(value), style="bold")), disabled=True)
+                )
+            else:
+                items.append(LinkItem(value))
+        if not items:
+            items = [
+                ListItem(
+                    Static(Text("No related code recorded.", style="dim")),
+                    disabled=True,
+                )
+            ]
+        await view.extend(items)
+        view.index = next((i for i, (k, _) in enumerate(rows) if k == "link"), None)
+
+    async def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        if event.list_view.id != "changes":
+            return
         idx = event.list_view.index
         selected = (
             self._changes[idx].id
@@ -150,18 +234,50 @@ class OverseerApp(App):
         if selected != self._selected:
             self._selected = selected
             self._hunk = 0
-        self._show()
+        await self._show()
 
-    def _step(self, delta: int) -> None:
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if isinstance(event.item, LinkItem):
+            self._open_link(event.item.link)
+
+    def action_pane(self, which: str) -> None:
+        self.query_one("#changes" if which == "left" else "#links").focus()
+
+    async def action_step_hunk(self, delta: int) -> None:
         change = self._current()
         if change and change.hunk_ids:
             last = len(resolve_hunks(change, self._sources)) - 1
             self._hunk = max(0, min(self._hunk + delta, last))
-            self._show()
+            await self._show()
             self.query_one("#detail-pane").scroll_home(animate=False)
 
-    def action_next_hunk(self) -> None:
-        self._step(1)
+    def action_scroll_detail(self, direction: int) -> None:
+        pane = self.query_one("#detail-pane")
+        pane.scroll_relative(y=direction * max(1, pane.size.height // 2), animate=False)
 
-    def action_prev_hunk(self) -> None:
-        self._step(-1)
+    def _open_link(self, link: Link) -> None:
+        editor = resolve_editor()
+        if not editor:
+            self.notify("Set $EDITOR (or $VISUAL) to open code", severity="error")
+        elif not Path(link.path).exists():
+            self.notify(f"{link.path} not found in {Path.cwd()}", severity="error")
+        else:
+            try:
+                self.run_editor(
+                    build_command(editor, link.path, link.line), is_gui(editor)
+                )
+            except OSError as e:
+                self.notify(f"Could not start {editor[0]}: {e}", severity="error")
+
+    def run_editor(self, cmd: list[str], gui: bool) -> None:
+        if gui:  # opens its own window; keep the TUI running
+            subprocess.Popen(
+                cmd,
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:  # terminal editor: hand over the terminal until it exits
+            with self.suspend():
+                subprocess.run(cmd)

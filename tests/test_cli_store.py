@@ -61,3 +61,19 @@ def test_record_risk(tmp_path, monkeypatch, capsys):
     assert cli.main(["record", "c1", "--risk", "red", "--risk-reason", "core"]) == 0
     assert store.load_change("c1").risk == "red"
     assert cli.main(["record", "c1", "--risk", "green"]) == 0  # reason may stay
+
+
+def test_link_command(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OVERSEER_DIR", str(tmp_path))
+    store = Store()
+    store.save_change(Change("c1", "t", ["s:1"]))
+    assert cli.main(["link", "c1", "src/a.py:12", "--note", "caller"]) == 0
+    assert cli.main(["link", "c1", "src/a.py:12", "--note", "better note"]) == 0
+    assert cli.main(["link", "c1", "README.md", "--hunk", "s:1"]) == 0
+    c = store.load_change("c1")
+    assert [(x.path, x.line, x.note) for x in c.links] == [
+        ("src/a.py", 12, "better note")
+    ]
+    assert c.hunk_links["s:1"][0].line is None
+    assert cli.main(["link", "c1", "x", "--hunk", "s:9"]) == 1
+    assert cli.main(["link", "nope", "x"]) == 1

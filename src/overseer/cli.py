@@ -7,7 +7,7 @@ import json
 import sys
 
 from overseer import gitdiff
-from overseer.model import QUESTIONS, RISKS
+from overseer.model import QUESTIONS, RISKS, Link
 from overseer.planning import PlanError, apply_plan, default_change
 from overseer.store import Store, _source_of
 
@@ -120,6 +120,30 @@ def _record(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def _link(store: Store, args: argparse.Namespace) -> int:
+    change = store.load_change(args.change_id)
+    if not change:
+        return _err(f"unknown change {args.change_id!r}")
+    path, _, tail = args.target.rpartition(":")
+    line = int(tail) if path and tail.isdigit() and int(tail) > 0 else None
+    if line is None:
+        path = args.target
+    if args.hunk:
+        if args.hunk not in change.hunk_ids:
+            return _err(f"{args.hunk} is not a hunk of {change.id}")
+        links = change.hunk_links.setdefault(args.hunk, [])
+    else:
+        links = change.links
+    for existing in links:
+        if (existing.path, existing.line) == (path, line):
+            existing.note = args.note or existing.note
+            break
+    else:
+        links.append(Link(path, line, args.note))
+    store.save_change(change)
+    return 0
+
+
 def _list(store: Store, args: argparse.Namespace) -> int:
     changes = store.changes()
     if args.unplanned:
@@ -162,6 +186,14 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--question", choices=sorted(QUESTIONS))
     rec.add_argument("--text", help="answer text for --question")
 
+    lnk = sub.add_parser(
+        "link", help="add related code to a change (or one of its hunks)"
+    )
+    lnk.add_argument("change_id")
+    lnk.add_argument("target", help="PATH or PATH:LINE, relative to the repo root")
+    lnk.add_argument("--note", default="", help="why it is related, a few words")
+    lnk.add_argument("--hunk", help="attach to this hunk id instead of the change")
+
     ls = sub.add_parser("list", help="list changes as JSON")
     ls.add_argument(
         "--unplanned", action="store_true", help="only changes not yet decomposed"
@@ -173,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         "show": _show,
         "plan": _plan,
         "record": _record,
+        "link": _link,
         "list": _list,
     }[args.cmd]
     return handler(Store(), args)

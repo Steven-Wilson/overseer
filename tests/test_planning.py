@@ -229,3 +229,40 @@ def test_risk_is_stored(store):
     )
     assert store.load_change(c.id).risk == "red"
     assert store.load_change(c.id).risk_reason == "core fn"
+
+
+def test_plan_stores_links(store):
+    (c,) = apply_plan(
+        store,
+        {
+            "changes": [
+                {
+                    "title": "t",
+                    "hunks": ["aaa:1", "aaa:2", "aaa:3"],
+                    "risk": "green",
+                    "related": [{"path": " x.py ", "line": 4, "note": "caller"}],
+                    "hunk_related": {"aaa:2": [{"path": "t.py"}]},
+                }
+            ]
+        },
+    )
+    got = store.load_change(c.id)
+    assert got.links[0].path == "x.py" and got.links[0].line == 4
+    assert got.hunk_links["aaa:2"][0].line is None
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ({"related": "x.py"}, "must be a list"),
+        ({"related": [{"line": 3}]}, "missing path"),
+        ({"related": [{"path": "x", "line": 0}]}, "positive integer"),
+        ({"related": [{"path": "x", "bogus": 1}]}, "must be an object"),
+        ({"hunk_related": {"aaa:1": [{"path": "x"}]}}, "not one of this change's"),
+        ({"hunk_related": []}, "keyed by hunk id"),
+    ],
+)
+def test_invalid_links_rejected(store, extra, message):
+    change = {"title": "t", "hunks": ["aaa:2", "aaa:3"], "risk": "green", **extra}
+    with pytest.raises(PlanError, match=message):
+        apply_plan(store, {"changes": [change]})

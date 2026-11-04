@@ -22,13 +22,20 @@ in the overseer repo itself use `uv run overseer-cli`.
    - order changes so each makes sense after the previous one; order hunks within a change the same way;
    - a small commit may stay a single change. Do not split for its own sake.
 5. **Explain** each change via `answers`. Valid keys: `mechanical`, `semantic`, `why`, `impact`, `behavior`, `patterns`, `refactor`, `coverage` (the eight review questions). Include only answers you can support from the code and commit message; do not guess intent. For `why`, say so when the commit message gives no reason. Use `patterns`/`refactor` to flag duplication of existing code you actually found. Keep each answer to a few sentences.
-6. **Rate risk** for each change (`risk`, plus `risk_reason` which is required for yellow and red). Risk tells the reviewer where to spend attention:
+6. **Link related code** so the reviewer can jump straight to what matters. Links are shown in the TUI and opened in `$EDITOR` on Enter. Per change (`related`) or, when it concerns one hunk specifically, per hunk (`hunk_related`, keyed by hunk id, which must belong to that change). Look for:
+   - **consumers**: callers/importers of any function, type or format whose behavior or signature changed (grep or LSP; do not guess);
+   - **tests** that cover (or should cover) the change;
+   - **precedent**: existing code that does the same job (reuse or duplication, relevant to `patterns`/`refactor`);
+   - **dependencies**: definitions the change relies on that the diff doesn't show.
+
+   Each link is `{"path": "src/x.py", "line": 42, "note": "why, in a few words"}`; `line` and `note` are optional. Paths are relative to the repo root and refer to the *working tree*, so check the line numbers there (and that the commit you are reviewing matches it). Keep lists short (about 6 or fewer); omit rather than pad. Add one later with `overseer-cli link <change-id> src/x.py:42 --note "..." [--hunk <hunk-id>]`.
+7. **Rate risk** for each change (`risk`, plus `risk_reason` which is required for yellow and red). Risk tells the reviewer where to spend attention:
    - `green`: very little or no risk; behavior is *verifiably* correct (tests that actually exercise it, or purely mechanical/docs/rename).
    - `yellow`: worth a look; tests cover the behavior only partially, so a manual check may be warranted.
    - `red`: guesswork (you are unsure of the intent), a breaking change, behavior only testable by mocking external services (tests weak or absent), or sweeping impact (many consumers, a core function changed).
 
    "Verifiable" means you checked: read the tests that cover the change and run them when you can. Do not rate green on the strength of the commit message. When torn between two levels, pick the higher. The reason should name the specific cause (e.g. "no test covers the error path", "rename touches 14 callers").
-7. **Submit** a plan: `overseer-cli plan plan.json` (or `-` for stdin):
+8. **Submit** a plan: `overseer-cli plan plan.json` (or `-` for stdin):
 
    ```json
    {"changes": [
@@ -36,11 +43,13 @@ in the overseer repo itself use `uv run overseer-cli`.
       "hunks": ["abc1234:1", "abc1234:2"],
       "risk": "yellow",
       "risk_reason": "parser is covered, but no test hits a rename-only diff",
-      "answers": {"semantic": "...", "why": "..."}}
+      "answers": {"semantic": "...", "why": "..."},
+      "related": [{"path": "src/overseer/cli.py", "line": 40, "note": "only caller"}],
+      "hunk_related": {"abc1234:2": [{"path": "tests/test_x.py", "line": 12}]}}
    ]}
    ```
 
    Every hunk of every commit the plan mentions must be assigned **exactly once**. On any problem nothing is written and each problem is printed; fix the plan and resubmit. A plan may mix hunks from several commits when one logical change spans them (then include all hunks of all those commits).
-8. **Verify**: `overseer-cli list` should show your changes with `"planned": true`.
+9. **Verify**: `overseer-cli list` should show your changes with `"planned": true`.
 
 Later corrections: `overseer-cli record <change-id> --question why --text "..."` `--title "..."`, or `--risk green|yellow|red --risk-reason "..."`. The human views everything with `overseer` (TUI).
