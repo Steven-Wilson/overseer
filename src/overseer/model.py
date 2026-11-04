@@ -5,6 +5,8 @@ Two layers:
 * `Source` — raw material as it exists upstream (currently: one git commit,
   split into `Hunk`s). Immutable once ingested; hunks are addressed by id
   (`<source id>:<1-based index>`).
+* `Note` — the human reviewer's feedback, attached to a hunk, a change or a whole
+  changeset, for an agent to read back and act on.
 * `Change` — a human-sized unit of review. It references hunks (possibly from
   several sources) and carries the explanation. A large or multi-purpose commit
   is decomposed into several `Change`s by an agent via `overseer-cli plan`.
@@ -115,4 +117,29 @@ class Change:
         data["hunk_links"] = {
             h: [Link(**x) for x in xs] for h, xs in data.get("hunk_links", {}).items()
         }
+        return cls(**data)
+
+
+NOTE_KINDS = ("hunk", "change", "changeset")
+NOTE_STATUSES = ("open", "addressed")
+
+
+@dataclass
+class Note:
+    """Reviewer feedback. Written by the human in the TUI; an agent reads it with
+    `overseer-cli notes` and marks it addressed with `overseer-cli resolve`."""
+
+    id: str  # n1, n2, ... within a changeset
+    kind: str  # one of NOTE_KINDS
+    ref: str = ""  # hunk id / change id / "" for a changeset-level note
+    text: str = ""
+    created: str = ""  # ISO 8601, UTC
+    status: str = "open"  # one of NOTE_STATUSES
+    reply: str = ""  # what the agent did about it, set when addressed
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Note:
         return cls(**data)

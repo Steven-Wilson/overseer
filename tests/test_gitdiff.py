@@ -69,5 +69,5 @@ def test_parse_patch_blank_context_line():
 def test_ingest_bad_rev(repo, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OVERSEER_DIR", str(tmp_path))
     monkeypatch.chdir(repo)
-    assert cli.main(["ingest", "nope"]) == 1
+    assert cli.main(["ingest", "nope", "--changeset", "default"]) == 1
     assert "error" in capsys.readouterr().err

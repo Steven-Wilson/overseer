@@ -10,9 +10,15 @@ changes that each do one thing, ordered so they read as a story, with the
 answers the reviewer needs. Commands below run from the repo being reviewed;
 in the overseer repo itself use `uv run overseer-cli`.
 
+## Changesets
+
+Review material is grouped into **changesets** (e.g. `local`, `pr-123`) so the human can swap between unrelated reviews in the TUI (`c`). Pick a name for what you are preparing (`pr-<number>` for a teammate's PR, otherwise ask or use `local`) and pass `--changeset <name>` on **every** command below (the CLI rejects commands without it, because the active changeset is whichever one the human last switched to, which may be a different review). Ingest creates the changeset without switching the human's view; they switch when ready. `overseer-cli changeset list|new|use|delete` manages them (`delete` discards everything in one).
+
+For a PR, fetch it so the range resolves (e.g. `gh pr checkout` or `git fetch origin pull/123/head:pr-123`), then ingest `<base>..pr-123` into its own changeset.
+
 ## Procedure
 
-1. **Ingest**: `overseer-cli ingest <rev>` (`HEAD`, a sha, or `A..B`). Re-running is safe. Output shows hunk and line counts per commit.
+1. **Ingest**: `overseer-cli ingest <rev> --changeset <name>` (`HEAD`, a sha, or `A..B`). Re-running is safe. Output shows hunk and line counts per commit.
 2. **Read**: `overseer-cli show <sha>` prints the commit message and every hunk with its id (`<sha>:<n>`). Read all of it, and read surrounding code in the repo when a hunk's purpose isn't clear from the diff.
 3. **Too coarse?** If one hunk mixes concerns, re-ingest finer: `overseer-cli ingest <sha> --context 0 --force`. This discards any changes already planned for that commit, so do it *before* planning. Hunk ids change; re-run `show`.
 4. **Group** hunks into changes:
@@ -52,4 +58,4 @@ in the overseer repo itself use `uv run overseer-cli`.
    Every hunk of every commit the plan mentions must be assigned **exactly once**. On any problem nothing is written and each problem is printed; fix the plan and resubmit. A plan may mix hunks from several commits when one logical change spans them (then include all hunks of all those commits).
 9. **Verify**: `overseer-cli list` should show your changes with `"planned": true`.
 
-Later corrections: `overseer-cli record <change-id> --question why --text "..."` `--title "..."`, or `--risk green|yellow|red --risk-reason "..."`. The human views everything with `overseer` (TUI).
+Later corrections (also with `--changeset`): `overseer-cli record <change-id> --question why --text "..."` `--title "..."`, or `--risk green|yellow|red --risk-reason "..."`. The human views everything with `overseer` (TUI).

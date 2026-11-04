@@ -11,17 +11,31 @@ def test_record_updates_existing_change(tmp_path, monkeypatch, capsys):
     store = Store()
     store.save_source(Source("s1", "Add X", [Hunk("a", "@@", ["+x"])], seq=1))
     store.save_change(default_change(store.load_source("s1")))
-    assert cli.main(["record", "s1", "--question", "why", "--text", "because"]) == 0
-    assert cli.main(["list"]) == 0
+    assert (
+        cli.main(
+            [
+                "record",
+                "s1",
+                "--question",
+                "why",
+                "--text",
+                "because",
+                "--changeset",
+                "default",
+            ]
+        )
+        == 0
+    )
+    assert cli.main(["list", "--changeset", "default"]) == 0
     (c,) = json.loads(capsys.readouterr().out)
     assert c["answers"] == {"why": "because"} and c["planned"] is False
-    assert cli.main(["list", "--unplanned"]) == 0
+    assert cli.main(["list", "--unplanned", "--changeset", "default"]) == 0
     assert len(json.loads(capsys.readouterr().out)) == 1
 
 
 def test_record_unknown_change_fails(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OVERSEER_DIR", str(tmp_path))
-    assert cli.main(["record", "nope", "--title", "x"]) == 1
+    assert cli.main(["record", "nope", "--title", "x", "--changeset", "default"]) == 1
     assert "unknown change" in capsys.readouterr().err
 
 
@@ -56,24 +70,61 @@ def test_record_risk(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OVERSEER_DIR", str(tmp_path))
     store = Store()
     store.save_change(Change("c1", "t", []))
-    assert cli.main(["record", "c1", "--risk", "red"]) == 1
+    assert cli.main(["record", "c1", "--risk", "red", "--changeset", "default"]) == 1
     assert "needs --risk-reason" in capsys.readouterr().err
-    assert cli.main(["record", "c1", "--risk", "red", "--risk-reason", "core"]) == 0
+    assert (
+        cli.main(
+            [
+                "record",
+                "c1",
+                "--risk",
+                "red",
+                "--risk-reason",
+                "core",
+                "--changeset",
+                "default",
+            ]
+        )
+        == 0
+    )
     assert store.load_change("c1").risk == "red"
-    assert cli.main(["record", "c1", "--risk", "green"]) == 0  # reason may stay
+    assert (
+        cli.main(["record", "c1", "--risk", "green", "--changeset", "default"]) == 0
+    )  # reason may stay
 
 
 def test_link_command(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OVERSEER_DIR", str(tmp_path))
     store = Store()
     store.save_change(Change("c1", "t", ["s:1"]))
-    assert cli.main(["link", "c1", "src/a.py:12", "--note", "caller"]) == 0
-    assert cli.main(["link", "c1", "src/a.py:12", "--note", "better note"]) == 0
-    assert cli.main(["link", "c1", "README.md", "--hunk", "s:1"]) == 0
+    assert (
+        cli.main(
+            ["link", "c1", "src/a.py:12", "--note", "caller", "--changeset", "default"]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "link",
+                "c1",
+                "src/a.py:12",
+                "--note",
+                "better note",
+                "--changeset",
+                "default",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(["link", "c1", "README.md", "--hunk", "s:1", "--changeset", "default"])
+        == 0
+    )
     c = store.load_change("c1")
     assert [(x.path, x.line, x.note) for x in c.links] == [
         ("src/a.py", 12, "better note")
     ]
     assert c.hunk_links["s:1"][0].line is None
-    assert cli.main(["link", "c1", "x", "--hunk", "s:9"]) == 1
-    assert cli.main(["link", "nope", "x"]) == 1
+    assert cli.main(["link", "c1", "x", "--hunk", "s:9", "--changeset", "default"]) == 1
+    assert cli.main(["link", "nope", "x", "--changeset", "default"]) == 1

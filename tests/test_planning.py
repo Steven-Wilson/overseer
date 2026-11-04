@@ -153,14 +153,16 @@ def test_end_to_end_ingest_show_plan(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(repo)
     monkeypatch.setenv("OVERSEER_DIR", str(tmp_path / "ov"))
 
-    assert cli.main(["ingest", "HEAD"]) == 0
+    assert cli.main(["ingest", "HEAD", "--changeset", "default"]) == 0
     sha = capsys.readouterr().out.split()[0]
-    assert cli.main(["ingest", "HEAD"]) == 0  # idempotent
+    assert cli.main(["ingest", "HEAD", "--changeset", "default"]) == 0  # idempotent
     assert "already ingested" in capsys.readouterr().out
-    assert cli.main(["ingest", "HEAD", "--context", "0"]) == 1  # different hunks
+    assert (
+        cli.main(["ingest", "HEAD", "--context", "0", "--changeset", "default"]) == 1
+    )  # different hunks
     capsys.readouterr()
 
-    assert cli.main(["show", sha, "--json"]) == 0
+    assert cli.main(["show", sha, "--json", "--changeset", "default"]) == 0
     hunks = json.loads(capsys.readouterr().out)["hunks"]
     assert [h["id"] for h in hunks] == [f"{sha}:1", f"{sha}:2"]
 
@@ -172,15 +174,20 @@ def test_end_to_end_ingest_show_plan(tmp_path, monkeypatch, capsys):
     }
     planfile = tmp_path / "plan.json"
     planfile.write_text(json.dumps(plan))
-    assert cli.main(["plan", str(planfile)]) == 0
+    assert cli.main(["plan", str(planfile), "--changeset", "default"]) == 0
     capsys.readouterr()
-    assert cli.main(["list", "--unplanned"]) == 0
+    assert cli.main(["list", "--unplanned", "--changeset", "default"]) == 0
     assert json.loads(capsys.readouterr().out) == []
 
     # --force with a finer context rebuilds the source and drops its changes
-    assert cli.main(["ingest", "HEAD", "--context", "0", "--force"]) == 0
+    assert (
+        cli.main(
+            ["ingest", "HEAD", "--context", "0", "--force", "--changeset", "default"]
+        )
+        == 0
+    )
     capsys.readouterr()
-    assert cli.main(["list"]) == 0
+    assert cli.main(["list", "--changeset", "default"]) == 0
     (c,) = json.loads(capsys.readouterr().out)
     assert c["planned"] is False and len(c["hunk_ids"]) == 2
 
