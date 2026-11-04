@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 from overseer.editor import build_command, is_gui, resolve_editor
-from overseer.freshness import Freshness, freshness, take_snapshot
+from overseer.freshness import Freshness, freshness, take_snapshot, when
 from overseer.model import (
     QUESTIONS,
     RISKS,
@@ -87,7 +87,9 @@ def render_change(
             f"hunk {', '.join(map(str, fresh.new_hunks))} of {fresh.total} new",
             "updated": "UPDATED since your last review: title, explanation or risk",
         }[fresh.kind]
-        out.append(f"{what}\n", style="bold cyan")
+        baseline = when(fresh.since)
+        out.append(what, style="bold cyan")
+        out.append(f"  (baseline {baseline})\n" if baseline else "\n", style="dim")
     if not change.planned:
         out.append(
             f"Not yet decomposed: whole commit, {len(hunks)} hunks. "

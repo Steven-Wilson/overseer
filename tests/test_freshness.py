@@ -120,3 +120,17 @@ async def test_done_key_takes_baseline_and_hidden_changes_are_counted(tmp_path):
         await pilot.press("t")
         await pilot.pause()
         assert "UPDATED" in labels(app)[0]
+
+
+def test_when_formats_the_baseline_and_tolerates_junk():
+    from overseer.freshness import when
+
+    assert when("2026-11-04T04:50:45+00:00")[:3] == "Nov"
+    assert when("not a time") == "" and when("") == ""
+
+
+def test_freshness_carries_the_baseline_time():
+    sources = {"s1": src("s1", "a")}
+    c = Change("c1", "T", ["s1:1"])
+    snap = take_snapshot([c], sources)
+    assert freshness(c, sources, snap).since == snap["at"]

@@ -46,11 +46,20 @@ def take_snapshot(changes: list[Change], sources: dict[str, Source]) -> dict:
     }
 
 
+def when(at: str) -> str:
+    """The snapshot time in the viewer's local zone, e.g. `Nov 04 04:50`."""
+    try:
+        return datetime.fromisoformat(at).astimezone().strftime("%b %d %H:%M")
+    except ValueError:
+        return ""
+
+
 @dataclass
 class Freshness:
     kind: str = ""  # "new" | "changed" | "updated" | "" (unchanged or no baseline)
     new_hunks: list[int] = field(default_factory=list)  # 1-based, within the change
     total: int = 0
+    since: str = ""  # when the baseline was taken (ISO), for display
 
     @property
     def tag(self) -> str:
@@ -69,7 +78,7 @@ def freshness(
     seen = set(snapshot.get("hunks", []))
     hunks = resolve_hunks(change, sources)
     fresh = [i + 1 for i, (_, _, h) in enumerate(hunks) if hunk_hash(h) not in seen]
-    out = Freshness(new_hunks=fresh, total=len(hunks))
+    out = Freshness(new_hunks=fresh, total=len(hunks), since=snapshot.get("at", ""))
     if hunks and len(fresh) == len(hunks):
         out.kind = "new"
     elif fresh:
