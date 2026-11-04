@@ -13,6 +13,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
+from overseer.deltaview import kind_of, stats
 from overseer.editor import build_command, is_gui, resolve_editor
 from overseer.freshness import Freshness, freshness, take_baseline, when
 from overseer.gitdiff import GitError, file_at, head_rev
@@ -20,13 +21,13 @@ from overseer.model import (
     QUESTIONS,
     RISKS,
     Change,
-    Hunk,
     Link,
     Note,
     Source,
     by_priority,
 )
-from overseer.store import Store, resolve_hunks
+from overseer.store import Resolved, Store, resolve_deltas
+from overseer.tui.render import append_delta
 
 POLL_SECONDS = 1.0
 
@@ -39,7 +40,7 @@ def risk_badge(change: Change) -> Text:
 
 # Explicit, because appending "s" is wrong for English in general. A word missing
 # from here raises KeyError, so adding a new counted noun forces the decision.
-PLURALS = {"hunk": "hunks", "file": "files", "change": "changes"}
+PLURALS = {"delta": "deltas", "file": "files", "change": "changes"}
 
 
 def _plural(n: int, word: str) -> str:
@@ -57,25 +58,42 @@ def append_note(out: Text, note: Note, where: str) -> None:
 
 
 def note_count(change: Change, notes: list[Note]) -> tuple[int, int]:
-    """(open, addressed) notes on the change itself or any of its hunks."""
+    """(open, addressed) notes on the change itself or any of its deltas."""
+    ids = set(change.delta_ids)
     mine = [
         n
         for n in notes
         if (n.kind == "change" and n.ref == change.id)
-        or (n.kind == "hunk" and n.ref in change.hunk_ids)
+        or (n.kind == "delta" and n.ref in ids)
     ]
     opened = sum(1 for n in mine if n.status == "open")
     return opened, len(mine) - opened
 
 
+def delta_title(r: Resolved) -> Text:
+    """`path +3 −1`, with what kind of delta it is when that is not a plain edit."""
+    t = Text()
+    if r.delta.moved:
+        t.append(f"{r.delta.path} → {r.delta.to_path}", style="cyan")
+        t.append(f"  moved {len(r.numbers)} lines", style="dim")
+        return t
+    t.append(r.delta.path, style="cyan")
+    added, removed = stats(r.file, r.numbers)
+    t.append(f"  +{added} −{removed}", style="dim")
+    kind = kind_of(r.file, r.numbers)
+    if kind != "edit":
+        t.append(f"  {kind} section", style="green" if kind == "added" else "red")
+    return t
+
+
 def render_change(
     change: Change,
-    hunks: list[tuple[Source, int, Hunk]],
-    hunk_index: int,
+    deltas: list[Resolved],
+    delta_index: int,
     notes: list[Note] | None = None,
     fresh: Freshness | None = None,
 ) -> Text:
-    """Overview (answers, commit message, hunk outline) first, then one hunk
+    """Overview (answers, commit message, delta outline) first, then one delta
     at a time. Built as `Text` (not markup) because diff content is full of brackets."""
     out = Text()
     out.append(f"{change.title}\n", style="bold underline")
@@ -84,13 +102,13 @@ def render_change(
         out.append(f"  {change.risk_reason}")
     out.append("\n")
     if not change.planned:
-        hunk_index = max(0, hunk_index)  # nothing to explain first
-    overview = hunk_index < 0 and bool(hunks)
+        delta_index = max(0, delta_index)  # nothing to explain first
+    overview = delta_index < 0 and bool(deltas)
     if fresh and fresh.kind:
         what = {
             "new": "NEW since your last review",
             "changed": "CHANGED since your last review: "
-            f"hunk {', '.join(map(str, fresh.new_hunks))} of {fresh.total} new",
+            f"delta {', '.join(map(str, fresh.new_deltas))} of {fresh.total} new",
             "updated": "UPDATED since your last review: title, answers or risk",
         }[fresh.kind]
         if overview or fresh.kind != "updated":
@@ -99,8 +117,8 @@ def render_change(
             out.append(f"  (baseline {baseline})\n" if baseline else "\n", style="dim")
     if not change.planned:
         out.append(
-            f"Not yet decomposed: whole commit, {len(hunks)} hunks. "
-            "Ask an agent to run the overseer-decompose skill.\n",
+            f"Not yet decomposed: whole commit, {_plural(len(deltas), 'delta')} "
+            "(one per file). Ask an agent to run the overseer-decompose skill.\n",
             style="yellow",
         )
     out.append("\n")
@@ -112,9 +130,9 @@ def render_change(
                 out.append(f"{QUESTIONS[key]}\n", style="bold")
                 out.append(f"{answer}\n\n")
         top = [
-            (n, "change" if n.kind == "change" else "changeset")
+            (n, "change" if n.kind == "change" else "reviewset")
             for n in notes
-            if (n.kind == "change" and n.ref == change.id) or n.kind == "changeset"
+            if (n.kind == "change" and n.ref == change.id) or n.kind == "reviewset"
         ]
         if top:
             out.append("Your notes\n", style="bold")
@@ -122,52 +140,41 @@ def render_change(
                 append_note(out, n, where)
             out.append("\n")
         seen: set[str] = set()
-        for source, _, _ in hunks:  # the commit(s) this change is cut from
-            if source.id not in seen:
-                seen.add(source.id)
-                out.append(f"Commit {source.id}\n", style="dim")
-                out.append(f"{source.message}\n\n", style="dim")
-        out.append("Hunks, in review order  (] starts)\n", style="bold")
-        for i, (source, idx, hunk) in enumerate(hunks):
-            hid = source.hunk_id(idx)
+        for r in deltas:  # the commit(s) this change is cut from
+            if r.source.id not in seen:
+                seen.add(r.source.id)
+                out.append(f"Commit {r.source.id}\n", style="dim")
+                out.append(f"{r.source.message}\n\n", style="dim")
+        out.append("Deltas, in review order  (] starts)\n", style="bold")
+        for i, r in enumerate(deltas):
             out.append(f"{i + 1}. ", style="bold cyan")
-            out.append(hunk.path, style="cyan")
-            if fresh and i + 1 in fresh.new_hunks:
+            out.append_text(delta_title(r))
+            if fresh and i + 1 in fresh.new_deltas:
                 out.append("  NEW", style="bold black on cyan")
-            summary = change.hunk_summaries.get(hid)
-            out.append(f"\n   {summary}\n" if summary else "\n", style="")
+            out.append(f"\n   {r.delta.summary}\n" if r.delta.summary else "\n")
         return out
 
-    if hunks:
-        hunk_index = max(0, min(hunk_index, len(hunks) - 1))
-        source, idx, hunk = hunks[hunk_index]
-        hid = source.hunk_id(idx)
+    if deltas:
+        delta_index = max(0, min(delta_index, len(deltas) - 1))
+        r = deltas[delta_index]
         if not change.planned:  # no overview to carry the commit message
-            out.append(f"Commit {source.id}\n", style="dim")
-            out.append(f"{source.message}\n\n", style="dim")
-        if not change.planned:  # no overview to carry the commit message
-            out.append(f"Commit {source.id}\n", style="dim")
-            out.append(f"{source.message}\n\n", style="dim")
-        out.append(
-            f"Hunk {hunk_index + 1}/{len(hunks)} ({hid})  {hunk.path}",
-            style="bold cyan",
-        )
-        if fresh and hunk_index + 1 in fresh.new_hunks:
+            out.append(f"Commit {r.source.id}\n", style="dim")
+            out.append(f"{r.source.message}\n\n", style="dim")
+        out.append(f"Delta {delta_index + 1}/{len(deltas)}  ", style="bold cyan")
+        out.append_text(delta_title(r))
+        if fresh and delta_index + 1 in fresh.new_deltas:
             out.append("  NEW", style="bold black on cyan")
         out.append("\n")
-        if change.hunk_summaries.get(hid):
-            out.append(f"{change.hunk_summaries[hid]}\n", style="bold")
-        out.append(f"{hunk.header}\n", style="magenta")
-        for line in hunk.lines:
-            style = {"+": "green", "-": "red"}.get(line[:1], "")
-            out.append(f"{line}\n", style=style)
-        here = [n for n in notes if n.kind == "hunk" and n.ref == hid]
+        if r.delta.summary:
+            out.append(f"{r.delta.summary}\n", style="bold")
+        append_delta(out, r)
+        here = [n for n in notes if n.kind == "delta" and n.ref == r.delta.id]
         if here:
-            out.append("\nYour notes on this hunk\n", style="bold")
+            out.append("\nYour notes on this delta\n", style="bold")
             for n in here:
-                append_note(out, n, "hunk")
+                append_note(out, n, "delta")
     else:
-        out.append("No hunks.\n", style="dim")
+        out.append("No deltas.\n", style="dim")
     return out
 
 
@@ -178,7 +185,7 @@ class VimList(ListView):
     ]
 
 
-class ChangesetList(VimList):
+class ReviewsetList(VimList):
     """While `confirming`, the next key answers the delete prompt: `y` confirms,
     anything else cancels. Stopping the event here keeps it from reaching the
     app's own bindings (Textual runs those after the focused widget)."""
@@ -214,17 +221,17 @@ class LinkItem(ListItem):
         self.link = link
 
 
-PICKER_TITLE = "Changesets (enter: switch, d: delete)"
+PICKER_TITLE = "Reviewsets (enter: switch, d: delete)"
 
 
-class ChangesetItem(ListItem):
+class ReviewsetItem(ListItem):
     def __init__(self, name: str, count: int, active: bool) -> None:
         label = Text()
         label.append("● " if active else "  ", style="bold green")
         label.append(name, style="bold" if active else "")
         label.append(f"  {_plural(count, 'change')}", style="dim")
         super().__init__(Static(label))
-        self.changeset = name
+        self.reviewset = name
 
 
 class OverseerApp(App):
@@ -233,9 +240,9 @@ class OverseerApp(App):
     #left { width: 35%; min-width: 24; }
     #changes { height: 1fr; border: round $panel; }
     #changes Static { text-wrap: nowrap; text-overflow: ellipsis; }
-    #changesets { display: none; height: auto; max-height: 12; border: round $accent; }
-    #changesets.open { display: block; }
-    #changesets.confirm { border: round $error; }
+    #reviewsets { display: none; height: auto; max-height: 12; border: round $accent; }
+    #reviewsets.open { display: block; }
+    #reviewsets.confirm { border: round $error; }
     #note-input { display: none; border: round $accent; }
     #note-input.open { display: block; }
     #right { width: 1fr; }
@@ -248,18 +255,18 @@ class OverseerApp(App):
         Binding("r", "refresh", "Refresh"),
         Binding("O", "open_working_tree", "Open working-tree file"),
         Binding("t", "toggle_text", "Tests/text"),
-        Binding("c", "changesets", "Changesets"),
-        Binding("d", "delete_changeset", "Delete changeset"),
-        Binding("n", "note('hunk')", "Note on hunk"),
+        Binding("c", "reviewsets", "Reviewsets"),
+        Binding("d", "delete_reviewset", "Delete reviewset"),
+        Binding("n", "note('delta')", "Note on delta"),
         Binding("N", "note('change')", "Note on change"),
-        Binding("m", "note('changeset')", "Note on changeset"),
+        Binding("m", "note('reviewset')", "Note on reviewset"),
         Binding("D", "done_reviewing", "Done reviewing"),
         Binding("R", "mark_reviewed", "Mark reviewed"),
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("h", "pane('left')", "Changes"),
         Binding("l", "pane('right')", "Related code"),
-        Binding("right_square_bracket", "step_hunk(1)", "Next hunk", key_display="]"),
-        Binding("left_square_bracket", "step_hunk(-1)", "Prev hunk", key_display="["),
+        Binding("right_square_bracket", "step_delta(1)", "Next delta", key_display="]"),
+        Binding("left_square_bracket", "step_delta(-1)", "Prev delta", key_display="["),
         Binding("ctrl+d", "scroll_detail(1)", "Scroll down", show=False),
         Binding("ctrl+u", "scroll_detail(-1)", "Scroll up", show=False),
     ]
@@ -269,13 +276,13 @@ class OverseerApp(App):
         self.store = store or Store()
         self._changes: list[Change] = []
         self._sources: dict[str, Source] = {}
-        self._name = self.store.name  # changeset being shown
+        self._name = self.store.name  # reviewset being shown
         self._other = 0  # changes in the view that is not showing
         self._show_text = False  # False: code view; True: white view
         self._view_key = (self._name, False)
         self._remembered: dict[tuple[str, bool], str | None] = {}  # selection per view
         self._selected: str | None = None  # change id, stable across refreshes
-        self._hunk = -1  # -1 = the change overview, before any hunk
+        self._delta = -1  # -1 = the change overview, before any delta
         self._shown_rows: tuple | None = None  # what the links list was built from
         self._head = ""  # our checkout's HEAD, to tell whether links match it
         self._pin_dir: str | None = None  # temp dir of read-only pinned copies
@@ -290,7 +297,7 @@ class OverseerApp(App):
         yield Header()
         with Horizontal():
             with Vertical(id="left"):
-                yield ChangesetList(id="changesets")
+                yield ReviewsetList(id="reviewsets")
                 yield VimList(id="changes")
             with Vertical(id="right"):
                 pane = VerticalScroll(Static(id="detail"), id="detail-pane")
@@ -301,7 +308,7 @@ class OverseerApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.query_one("#changesets").border_title = PICKER_TITLE
+        self.query_one("#reviewsets").border_title = PICKER_TITLE
         self.query_one("#links").border_title = "Related code"
         await self.action_refresh()
         self.query_one("#changes").focus()
@@ -309,8 +316,8 @@ class OverseerApp(App):
         self.set_interval(POLL_SECONDS, self.action_refresh)
 
     async def action_refresh(self) -> None:
-        # The active changeset can move under us (`overseer-cli changeset use`).
-        # Switching changeset or code/text view both swap the whole list.
+        # The active reviewset can move under us (`overseer-cli reviewset use`).
+        # Switching reviewset or code/text view both swap the whole list.
         view_key = (self.store.name, self._show_text)
         switched = view_key != self._view_key
         if switched:
@@ -318,14 +325,14 @@ class OverseerApp(App):
             self._view_key = view_key
             self._name = self.store.name
             self._selected = self._remembered.get(view_key)
-            self._hunk = -1  # -1 = the change overview, before any hunk
+            self._delta = -1  # -1 = the change overview, before any delta
             self._shown_rows = None
         self._head = head_rev()  # a checkout can change under us, like the store
         review = self.store.review()
         if review != self._review:
             self._review = review
             self.refresh_bindings()
-        self.sub_title = f"changeset: {self._name}" + (
+        self.sub_title = f"reviewset: {self._name}" + (
             "  ·  REVIEW REQUESTED, press D when done"
             + (f": {review['message']}" if review["message"] else "")
             if review["state"] == "requested"
@@ -358,7 +365,7 @@ class OverseerApp(App):
         ]
         if same_changes and sources == self._sources and not switched:
             if notes != self._notes or baseline != self._baseline:
-                # relabel in place: keep cursor and hunk
+                # relabel in place: keep cursor and delta
                 self._notes, self._baseline = notes, baseline
                 for item, change in zip(
                     self.query("#changes ListItem"), changes, strict=False
@@ -387,7 +394,7 @@ class OverseerApp(App):
         await self._show()
 
     def _label(self, change: Change) -> Text:
-        """Two lines: risk and title, then size (hunks, files) and notes."""
+        """Two lines: risk and title, then size (deltas, files) and notes."""
         label = Text()
         if change.risk in RISKS:
             label.append("● ", style=f"bold {change.risk}")  # white is a rich color
@@ -396,10 +403,11 @@ class OverseerApp(App):
         label.append(change.title)
         if not change.planned:
             label.append(" (whole commit)", style="dim yellow")
-        hunks = resolve_hunks(change, self._sources)
-        files = len({h.path for _, _, h in hunks})
+        deltas = resolve_deltas(change, self._sources)
+        files = len({p for r in deltas for p in (r.delta.path, r.delta.to_path) if p})
         label.append(
-            f"\n  {_plural(len(hunks), 'hunk')} · {_plural(files, 'file')}", style="dim"
+            f"\n  {_plural(len(deltas), 'delta')} · {_plural(files, 'file')}",
+            style="dim",
         )
         fresh = freshness(change, self._sources, self._baseline)
         if fresh.kind:
@@ -418,18 +426,17 @@ class OverseerApp(App):
         return None
 
     def _link_rows(self) -> list[tuple[str, str | Link]]:
-        """Related code for the current hunk, then for the whole change."""
+        """Related code for the current delta, then for the whole change."""
         change = self._current()
         if not change:
             return []
         rows: list[tuple[str, str | Link]] = []
-        hunks = resolve_hunks(change, self._sources)
-        if hunks and (self._hunk >= 0 or not change.planned):
-            source, idx, hunk = hunks[max(0, min(self._hunk, len(hunks) - 1))]
-            for_hunk = change.hunk_links.get(source.hunk_id(idx), [])
-            if for_hunk:
-                rows.append(("head", f"This hunk · {hunk.path}"))
-                rows += [("link", link) for link in for_hunk]
+        deltas = resolve_deltas(change, self._sources)
+        if deltas and (self._delta >= 0 or not change.planned):
+            r = deltas[max(0, min(self._delta, len(deltas) - 1))]
+            if r.delta.links:
+                rows.append(("head", f"This delta · {r.delta.path}"))
+                rows += [("link", link) for link in r.delta.links]
         if change.links:
             rows.append(("head", "This change"))
             rows += [("link", link) for link in change.links]
@@ -439,9 +446,11 @@ class OverseerApp(App):
         change = self._current()
         detail = self.query_one("#detail", Static)
         if change:
-            hunks = resolve_hunks(change, self._sources)
+            deltas = resolve_deltas(change, self._sources)
             fresh = freshness(change, self._sources, self._baseline)
-            detail.update(render_change(change, hunks, self._hunk, self._notes, fresh))
+            detail.update(
+                render_change(change, deltas, self._delta, self._notes, fresh)
+            )
         elif self._other:
             where = "code" if self._show_text else "white"
             detail.update(
@@ -491,25 +500,25 @@ class OverseerApp(App):
         )
         if selected != self._selected:
             self._selected = selected
-            self._hunk = -1  # -1 = the change overview, before any hunk
+            self._delta = -1  # -1 = the change overview, before any delta
         await self._show()
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if isinstance(event.item, LinkItem):
             self._open_link(event.item.link)
-        elif isinstance(event.item, ChangesetItem):
-            self.store.set_active(event.item.changeset)
-            await self.action_close_changesets()
+        elif isinstance(event.item, ReviewsetItem):
+            self.store.set_active(event.item.reviewset)
+            await self.action_close_reviewsets()
             await self.action_refresh()
 
     async def action_toggle_text(self) -> None:
         self._show_text = not self._show_text
         await self.action_refresh()
 
-    async def action_changesets(self) -> None:
-        picker = self.query_one("#changesets", ListView)
+    async def action_reviewsets(self) -> None:
+        picker = self.query_one("#reviewsets", ListView)
         if picker.has_class("open"):
-            await self.action_close_changesets()
+            await self.action_close_reviewsets()
             return
         await self._fill_picker()
         picker.add_class("open")
@@ -517,11 +526,11 @@ class OverseerApp(App):
         self.refresh_bindings()
 
     async def _fill_picker(self, index: int | None = None) -> None:
-        picker = self.query_one("#changesets", ChangesetList)
-        names = self.store.changeset_names()
+        picker = self.query_one("#reviewsets", ReviewsetList)
+        names = self.store.reviewset_names()
         await picker.clear()
         await picker.extend(
-            ChangesetItem(n, self.store.count_changes(n), n == self._name)
+            ReviewsetItem(n, self.store.count_changes(n), n == self._name)
             for n in names
         )
         if index is None:
@@ -529,8 +538,8 @@ class OverseerApp(App):
         picker.index = min(index, len(names) - 1)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action == "delete_changeset":  # only meaningful (and shown) in the picker
-            return self.query_one("#changesets").has_class("open")
+        if action == "delete_reviewset":  # only meaningful (and shown) in the picker
+            return self.query_one("#reviewsets").has_class("open")
         if action == "open_working_tree":  # about the highlighted related-code row
             return self.focused is not None and self.focused.id == "links"
         if action == "done_reviewing":
@@ -541,14 +550,13 @@ class OverseerApp(App):
 
     def action_note(self, kind: str) -> None:
         change = self._current()
-        if kind != "changeset" and not change:
+        if kind != "reviewset" and not change:
             return
         ref = ""
-        if kind == "hunk" and change:
-            hunks = resolve_hunks(change, self._sources)
-            if hunks and (self._hunk >= 0 or not change.planned):
-                source, idx, _ = hunks[max(0, min(self._hunk, len(hunks) - 1))]
-                ref = source.hunk_id(idx)
+        if kind == "delta" and change:
+            deltas = resolve_deltas(change, self._sources)
+            if deltas and (self._delta >= 0 or not change.planned):
+                ref = deltas[max(0, min(self._delta, len(deltas) - 1))].delta.id
             else:
                 kind = "change"  # nothing to point at, so note the change
         if kind == "change" and change:
@@ -588,7 +596,7 @@ class OverseerApp(App):
         if self._note_target is not None:
             self._close_note_input()
         else:
-            await self.action_close_changesets()
+            await self.action_close_reviewsets()
 
     async def action_done_reviewing(self) -> None:
         if self._review.get("state") != "requested":
@@ -604,33 +612,33 @@ class OverseerApp(App):
         self.notify("Marked everything reviewed; changes from now on will be flagged")
         await self.action_refresh()
 
-    def action_delete_changeset(self) -> None:
-        picker = self.query_one("#changesets", ChangesetList)
+    def action_delete_reviewset(self) -> None:
+        picker = self.query_one("#reviewsets", ReviewsetList)
         item = picker.highlighted_child
-        if not isinstance(item, ChangesetItem):
+        if not isinstance(item, ReviewsetItem):
             return
-        picker.confirming = item.changeset
+        picker.confirming = item.reviewset
         picker.add_class("confirm")
         picker.border_title = (
-            f"Delete '{item.changeset}' and its changes? y = delete, any key = cancel"
+            f"Delete '{item.reviewset}' and its changes? y = delete, any key = cancel"
         )
 
     async def finish_delete(self, name: str, confirmed: bool) -> None:
-        picker = self.query_one("#changesets", ChangesetList)
+        picker = self.query_one("#reviewsets", ReviewsetList)
         picker.remove_class("confirm")
         picker.border_title = PICKER_TITLE
         if not confirmed:
             return
-        self.store.delete_changeset(name)
-        self.notify(f"Deleted changeset '{name}'")
+        self.store.delete_reviewset(name)
+        self.notify(f"Deleted reviewset '{name}'")
         index = picker.index or 0
         await self._fill_picker(index)
-        await self.action_refresh()  # the viewed changeset may be the one deleted
+        await self.action_refresh()  # the viewed reviewset may be the one deleted
         for text_view in (False, True):
             self._remembered.pop((name, text_view), None)
 
-    async def action_close_changesets(self) -> None:
-        picker = self.query_one("#changesets", ChangesetList)
+    async def action_close_reviewsets(self) -> None:
+        picker = self.query_one("#reviewsets", ReviewsetList)
         if picker.has_class("open"):
             picker.confirming = None
             picker.remove_class("open", "confirm")
@@ -641,12 +649,12 @@ class OverseerApp(App):
     def action_pane(self, which: str) -> None:
         self.query_one("#changes" if which == "left" else "#links").focus()
 
-    async def action_step_hunk(self, delta: int) -> None:
+    async def action_step_delta(self, step: int) -> None:
         change = self._current()
-        if change and change.hunk_ids:
-            last = len(resolve_hunks(change, self._sources)) - 1
+        if change and change.deltas:
+            last = len(resolve_deltas(change, self._sources)) - 1
             floor = -1 if change.planned else 0
-            self._hunk = max(floor, min(self._hunk + delta, last))
+            self._delta = max(floor, min(self._delta + step, last))
             await self._show()
             self.query_one("#detail-pane").scroll_home(animate=False)
 

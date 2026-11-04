@@ -1,4 +1,4 @@
-"""Turn git commits into `Change`s with per-hunk granularity.
+"""Turn git commits into `Source`s: one `FileDiff` per file.
 
 Shells out to `git`; must not import textual.
 """
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import subprocess
 
-from overseer.model import Hunk, Source
+from overseer.model import FileDiff, Source, is_changed
 
 
 class GitError(RuntimeError):
@@ -43,38 +43,41 @@ def file_at(rev: str, path: str, cwd: str | None = None) -> bytes:
     return proc.stdout
 
 
-def parse_patch(patch: str) -> list[Hunk]:
-    """Split a unified `git diff` into hunks. Non-text file changes (binary,
-    mode-only, empty new files) become a single line-less hunk with a note."""
-    hunks: list[Hunk] = []
-    path = ""
-    current: Hunk | None = None
-    file_has_hunk = False
+def parse_patch(patch: str) -> list[FileDiff]:
+    """Split a unified `git diff` into one `FileDiff` per file. Git's hunk
+    boundaries survive only as `@@` header lines inside `lines`; they are not
+    review units. A non-text change (binary, mode-only, empty new file) becomes
+    the single line `!(note)`."""
+    files: list[FileDiff] = []
+    current: FileDiff | None = None
     note = ""
+    in_header = False
+    in_hunk = False
 
     def flush_file() -> None:
-        if path and not file_has_hunk:
-            hunks.append(Hunk(path=path, header=note or "(no textual changes)"))
+        if current is not None:
+            if not any(is_changed(line) for line in current.lines):
+                current.lines.append(f"!{note or '(no textual changes)'}")
+            files.append(current)
 
-    in_header = False
     for line in patch.splitlines():
         if line.startswith("diff --git "):
             flush_file()
             # "diff --git a/x b/x"; fixed up by ---/+++ lines when present
-            path = line.rsplit(" b/", 1)[-1]
-            current, file_has_hunk, note, in_header = None, False, "", True
+            current = FileDiff(path=line.rsplit(" b/", 1)[-1])
+            note, in_header, in_hunk = "", True, False
+        elif current is None:
+            continue
         elif in_header and line.startswith("--- "):
             if line != "--- /dev/null":
-                path = line[6:].split("\t")[0]
+                current.path = line[6:].split("\t")[0]
         elif in_header and line.startswith("+++ "):
             if line != "+++ /dev/null":
-                path = line[6:].split("\t")[0]
+                current.path = line[6:].split("\t")[0]
         elif line.startswith("@@"):
-            in_header = False
-            current = Hunk(path=path, header=line)
-            hunks.append(current)
-            file_has_hunk = True
-        elif current is not None and (line[:1] in "+- \\" and line):
+            in_header, in_hunk = False, True
+            current.lines.append(line)
+        elif in_hunk and (line[:1] in "+- \\" and line):
             current.lines.append(line)
         elif in_header and line.startswith("Binary files"):
             note = "(binary file changed)"
@@ -84,29 +87,21 @@ def parse_patch(patch: str) -> list[Hunk]:
             note = "(file deleted)"
         elif in_header and line.startswith("old mode"):
             note = "(mode changed)"
-        elif current is not None and line == "":
+        elif in_hunk and line == "":
             current.lines.append(" ")  # blank context line stripped of its space
     flush_file()
-    return hunks
+    return files
 
 
-def commit_to_source(sha: str, cwd: str | None = None, context: int = 3) -> Source:
-    """`context` is git's -U: fewer context lines means hunks split more finely."""
+def commit_to_source(sha: str, cwd: str | None = None) -> Source:
     full = _git("rev-parse", "--verify", f"{sha}^{{commit}}", cwd=cwd).strip()
     message = _git("show", "-s", "--format=%B", full, cwd=cwd).strip()
-    # --no-renames keeps each file's hunks self-describing; -m is not used, so
-    # merge commits show no diff.
+    # --no-renames keeps each file self-describing; -m is not used, so merge
+    # commits show no diff.
     patch = _git(
-        "show",
-        "--format=",
-        "--patch",
-        "--no-color",
-        "--no-renames",
-        f"-U{context}",
-        full,
-        cwd=cwd,
+        "show", "--format=", "--patch", "--no-color", "--no-renames", full, cwd=cwd
     )
-    return Source(id=full[:7], message=message, hunks=parse_patch(patch))
+    return Source(id=full[:7], message=message, files=parse_patch(patch))
 
 
 def resolve_commits(rev: str, cwd: str | None = None) -> list[str]:

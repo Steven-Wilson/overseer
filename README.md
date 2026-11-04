@@ -31,24 +31,27 @@ skills. Use them as written.
 | **reviewer** | The person using the TUI. Skills never say "the human" or "the user". |
 | **agent** | The coding agent driving `overseer-cli`: it prepares changes and answers notes. |
 | **commit** | A git commit, as ingested. (`Source` in the code; the CLI, TUI and skills say "commit".) |
-| **hunk** | One contiguous piece of a commit's diff. Its id is `<7-char sha>:<n>`, e.g. `abc1234:2`. |
-| **change** | The unit the reviewer reviews: a titled group of hunks (possibly from several commits) with a purpose. Ids look like `abc1234-01`. |
-| **whole commit** | The default change made at ingest: one per commit, not yet decomposed. |
+| **changed line** | One added (`+`) or removed (`-`) line of a commit's diff, numbered 1, 2, 3, ... per file (`overseer-cli show` prints the numbers). Context lines have no number. A non-text change (binary, mode) counts as one changed line. |
+| **delta** | The atomic unit of review: the changed lines of one file that belong together, picked by the agent, not by git. It may be a slice of what git calls a hunk, or span several hunks of one file. Its id is `<7-char sha>:<path>#<lines>`, e.g. `abc1234:src/x.py#3-5,9`. A delta is **not** a git hunk. |
+| **move** | A delta that carries code from one place to another (extracted into a function, nested under a new `if`, carried to another file). It has two ends, the removed lines and the added lines (`moved_to` in a plan), and is shown as *removed from here* / *added here*. Whatever else changed around it is a separate delta. `overseer-cli show` lists *possible moves* it finds (removed lines that reappear, ignoring indentation); the agent decides which are real. |
+| **section** | A delta of only added lines (*added section*, green accent) or only removed lines (*removed section*, red accent), shown whole with syntax highlighting. A delta mixing both is an *edit*: shown as a diff with the exact words that changed emphasised. The kind follows from the lines; nobody labels it. |
+| **change** | The unit of meaning: one intention you can state in a sentence ("renamed `foo` to `bar`", "guarded the empty case"), made of one or more deltas, possibly across files and commits. It carries a title, answers and a risk. Ids look like `abc1234-01`. |
+| **whole commit** | The default change made at ingest: one per commit, one delta per file, not yet decomposed. |
 | **decompose** | Replace a commit's whole-commit change with several focused changes. Changes are *decomposed* (`planned: true` in JSON) or *undecomposed*. |
-| **plan** | The JSON an agent submits (`overseer-cli plan`) to decompose. Every hunk of every commit it touches must be assigned exactly once. |
-| **review order** | The order the agent wrote its changes and hunks in, so they read as a story. The TUI keeps it within a risk tier. |
+| **plan** | The JSON an agent submits (`overseer-cli plan`) to decompose. Every changed line of every commit it touches must be in exactly one delta. |
+| **review order** | The order the agent wrote its changes and deltas in, so they read as a story. The TUI keeps it within a risk tier. |
 | **review questions** | The eight questions at the top of this file. |
 | **answer** | The response to one review question, on a change. Only questions worth answering are answered. |
-| **hunk summary** | One sentence per hunk: what it does and why it sits there. |
-| **overview** | What the TUI shows first for a decomposed change: its answers and an outline of hunk summaries, before hunk 1. |
-| **related code** | A pointer (`path`, optional line and note) to code that helps judge a change or hunk: consumers, tests, precedent, dependencies. Recorded with `link` / `related` in the CLI. Enter opens it. |
+| **delta summary** | One sentence per delta: what it does and why it sits there. |
+| **overview** | What the TUI shows first for a decomposed change: its answers and an outline of delta summaries, before delta 1. |
+| **related code** | A pointer (`path`, optional line and note) to code that helps judge a change or delta: consumers, tests, precedent, dependencies. Recorded with `link` / `related` in the CLI. Enter opens it. |
 | **risk** | How much reviewer attention a change needs: **red** (guesswork, breaking, weakly tested, or sweeping), **yellow** (worth a look), **green** (verifiably correct), **white** (tests, docs or comments only). Everything but green has a *risk reason*; unrated shows as `○`. |
 | **code view / white view** | The two lists in the TUI. White changes are hidden from the code view (`t` swaps); the list border always counts them. |
-| **changeset** | An isolated set of commits and changes to review, e.g. `local` or `pr-123`. Every `overseer-cli` command except `changeset` names one with `--changeset`. The TUI shows one at a time (the *active* one). |
-| **note** | The reviewer's feedback on a hunk (`n`), a change (`N`) or a changeset (`m`). *Open* until the agent *resolves* it with a reply, then *addressed*. A note whose target vanished after a re-ingest or re-plan is *stale*. |
+| **reviewset** | Everything being reviewed together: a set of commits and the changes made from them, e.g. `local` or `pr-123`. Every `overseer-cli` command except `reviewset` names one with `--reviewset`. The TUI shows one at a time (the *active* one). |
+| **note** | The reviewer's feedback on a delta (`n`), a change (`N`) or a reviewset (`m`). *Open* until the agent *resolves* it with a reply, then *addressed*. A note whose target vanished after a re-ingest or re-plan is *stale*. |
 | **review request** | The agent pauses for the reviewer: `review request`, then `review wait` until the reviewer presses `D` (*done reviewing*). |
-| **baseline** | What the reviewer had seen at their last `D` or `R` (*mark reviewed*). Matched by hunk content, not ids. |
-| **NEW / CHANGED +N / UPDATED** | Freshness against the baseline: NEW = no hunk seen before; CHANGED +N = N hunks not seen; UPDATED = same code, different title, answers or risk. |
+| **baseline** | What the reviewer had seen at their last `D` or `R` (*mark reviewed*). Matched by changed-line content, not ids. |
+| **NEW / CHANGED +N / UPDATED** | Freshness against the baseline: NEW = no delta seen before; CHANGED +N = N deltas not seen; UPDATED = same code, different title, answers or risk. |
 | **store** | The `.overseer/` directory both programs share. |
 
 ## How it works
@@ -96,13 +99,13 @@ point at the same store.
    Overseer" (or a range, or a teammate's PR). It will run something like:
 
    ```
-   overseer-cli ingest main..HEAD --changeset local
-   overseer-cli show <sha> --changeset local
-   overseer-cli plan plan.json --changeset local
+   overseer-cli ingest main..HEAD --reviewset local
+   overseer-cli show <sha> --reviewset local
+   overseer-cli plan plan.json --reviewset local
    ```
 
-   Every CLI command takes `--changeset NAME`, an isolated review set
-   (e.g. `local`, `pr-123`), so unrelated reviews don't mix.
+   Every CLI command takes `--reviewset NAME` (e.g. `local`, `pr-123`), so
+   unrelated reviews don't mix.
 
 2. **Review.** In another terminal, in the same repo:
 
@@ -122,13 +125,13 @@ point at the same store.
 | --- | --- |
 | `j` / `k` | move within the focused list |
 | `h` / `l` | focus changes / related-code pane |
-| `[` / `]` | previous / next hunk (a planned change opens on an overview) |
+| `[` / `]` | previous / next delta (a planned change opens on an overview) |
 | `ctrl+d` / `ctrl+u` | scroll the diff |
 | `Enter` | open the highlighted related code in `$EDITOR` |
 | `O` | open the working-tree file for related code recorded at another commit |
 | `t` | swap the code view and the white view |
-| `c` | switch changeset (`d` then `y` deletes the highlighted one) |
-| `n` / `N` / `m` | note on the hunk / change / changeset (Enter saves, Esc cancels) |
+| `c` | switch reviewset (`d` then `y` deletes the highlighted one) |
+| `n` / `N` / `m` | note on the delta / change / reviewset (Enter saves, Esc cancels) |
 | `R` | mark everything reviewed |
 | `D` | finish a review the agent requested |
 

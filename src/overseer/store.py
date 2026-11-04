@@ -1,18 +1,18 @@
 """File-backed store under `$OVERSEER_DIR` (default `./.overseer`).
 
-    active                                  name of the changeset being viewed
-    changesets/<name>/sources/<id>.json     raw ingested material (one per commit)
-    changesets/<name>/changes/<id>.json     reviewable units referencing hunks
-    changesets/<name>/notes/<id>.json       the human reviewer's notes
-    changesets/<name>/review.json           review handshake (idle/requested/done)
-    changesets/<name>/reviewed.json         baseline: what the reviewer last saw
+    active                                  name of the reviewset being viewed
+    reviewsets/<name>/sources/<id>.json     raw ingested material (one per commit)
+    reviewsets/<name>/changes/<id>.json     reviewable units made of deltas
+    reviewsets/<name>/notes/<id>.json       the human reviewer's notes
+    reviewsets/<name>/review.json           review handshake (idle/requested/done)
+    reviewsets/<name>/reviewed.json         baseline: what the reviewer last saw
 
-A changeset is an independent body of review material (e.g. "my local commits"
-vs "teammate's PR 123"). Everything else operates on one changeset at a time:
+A reviewset is an independent body of review material (e.g. "my local commits"
+vs "teammate's PR 123"). Everything else operates on one reviewset at a time:
 the one named explicitly, else the one in `active`, else `default`.
 
 The CLI writes, the TUI reads, except for the reviewer's own input (notes, "done
-reviewing", the active changeset), which the TUI writes and the CLI reads. Writes
+reviewing", the active reviewset), which the TUI writes and the CLI reads. Writes
 are atomic so a long-running TUI never sees a partial file.
 """
 
@@ -23,29 +23,37 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import NamedTuple
 
-from overseer.model import Change, Hunk, Note, Source, split_hunk_id
+from overseer.model import (
+    Change,
+    Delta,
+    FileDiff,
+    Note,
+    Source,
+    parse_lines,
+)
 
-DEFAULT_CHANGESET = "default"
+DEFAULT_REVIEWSET = "default"
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
-def valid_changeset_name(name: str) -> bool:
+def valid_reviewset_name(name: str) -> bool:
     """Names become directory names, so no separators or leading dots."""
     return bool(_NAME.match(name))
 
 
 class Store:
-    """`changeset=None` follows the `active` pointer (re-read on every access,
+    """`reviewset=None` follows the `active` pointer (re-read on every access,
     so a long-running TUI notices a switch); a name pins the store to it."""
 
-    def __init__(self, root: Path | None = None, changeset: str | None = None) -> None:
+    def __init__(self, root: Path | None = None, reviewset: str | None = None) -> None:
         self.root = root or Path(os.environ.get("OVERSEER_DIR", ".overseer"))
-        self._pinned = changeset
-        if changeset is not None and not valid_changeset_name(changeset):
-            raise ValueError(f"invalid changeset name {changeset!r}")
+        self._pinned = reviewset
+        if reviewset is not None and not valid_reviewset_name(reviewset):
+            raise ValueError(f"invalid reviewset name {reviewset!r}")
 
-    # -- changesets ----------------------------------------------------
+    # -- reviewsets ----------------------------------------------------
 
     @property
     def name(self) -> str:
@@ -54,64 +62,48 @@ class Store:
         try:
             name = (self.root / "active").read_text().strip()
         except OSError:
-            return DEFAULT_CHANGESET
-        return name if valid_changeset_name(name) else DEFAULT_CHANGESET
+            return DEFAULT_REVIEWSET
+        return name if valid_reviewset_name(name) else DEFAULT_REVIEWSET
 
     def _dir(self, name: str) -> Path:
-        return self.root / "changesets" / name
-
-    def _migrate_flat_layout(self) -> None:
-        """Before changesets, sources/ and changes/ sat directly in the root."""
-        old = [self.root / "sources", self.root / "changes"]
-        if not any(d.is_dir() for d in old):
-            return
-        target = self._dir(DEFAULT_CHANGESET)
-        target.mkdir(parents=True, exist_ok=True)
-        for d in old:
-            if d.is_dir() and not (target / d.name).exists():
-                d.replace(target / d.name)
+        return self.root / "reviewsets" / name
 
     @property
     def sources_dir(self) -> Path:
-        self._migrate_flat_layout()
         return self._dir(self.name) / "sources"
 
     @property
     def changes_dir(self) -> Path:
-        self._migrate_flat_layout()
         return self._dir(self.name) / "changes"
 
     @property
     def notes_dir(self) -> Path:
-        self._migrate_flat_layout()
         return self._dir(self.name) / "notes"
 
-    def changeset_names(self) -> list[str]:
-        self._migrate_flat_layout()
-        base = self.root / "changesets"
+    def reviewset_names(self) -> list[str]:
+        base = self.root / "reviewsets"
         found = (
             {p.name for p in base.iterdir() if p.is_dir()} if base.exists() else set()
         )
         return sorted(found | {self.name})
 
-    def has_changeset(self, name: str) -> bool:
-        self._migrate_flat_layout()
+    def has_reviewset(self, name: str) -> bool:
         return self._dir(name).is_dir()
 
     def count_changes(self, name: str) -> int:
         return len(list((self._dir(name) / "changes").glob("*.json")))
 
-    def create_changeset(self, name: str) -> None:
-        if not valid_changeset_name(name):
+    def create_reviewset(self, name: str) -> None:
+        if not valid_reviewset_name(name):
             raise ValueError(
-                f"invalid changeset name {name!r} "
+                f"invalid reviewset name {name!r} "
                 "(letters, digits, '.', '_', '-'; must start with a letter or digit)"
             )
         self._dir(name).mkdir(parents=True, exist_ok=True)
 
     def set_active(self, name: str) -> None:
         """Move the shared pointer the TUI (and unpinned CLI calls) follow."""
-        self.create_changeset(name)
+        self.create_reviewset(name)
         self._write_active(name)
 
     def _write_active(self, name: str) -> None:
@@ -120,9 +112,9 @@ class Store:
         tmp.write_text(name + "\n")
         tmp.replace(self.root / "active")
 
-    def delete_changeset(self, name: str) -> None:
-        if not valid_changeset_name(name):
-            raise ValueError(f"invalid changeset name {name!r}")
+    def delete_reviewset(self, name: str) -> None:
+        if not valid_reviewset_name(name):
+            raise ValueError(f"invalid reviewset name {name!r}")
         shutil.rmtree(self._dir(name), ignore_errors=True)
         try:
             pointed = (self.root / "active").read_text().strip()
@@ -221,44 +213,14 @@ class Store:
 
     def changes(self, sources: dict[str, Source] | None = None) -> list[Change]:
         """Display order: by earliest ingested source, then plan position."""
-        raw = self._read_all(self.changes_dir)
-        if any("hunks" in d for d in raw):
-            self._migrate_legacy(raw)
-            raw, sources = self._read_all(self.changes_dir), None
         sources = self.sources() if sources is None else sources
-        out = [Change.from_dict(d) for d in raw]
+        out = [Change.from_dict(d) for d in self._read_all(self.changes_dir)]
 
         def key(c: Change) -> tuple:
-            seqs = [
-                sources[sid].seq
-                for sid in (_source_of(h) for h in c.hunk_ids)
-                if sid in sources
-            ]
+            seqs = [sources[d.commit].seq for d in c.deltas if d.commit in sources]
             return (min(seqs, default=1 << 30), c.position, c.id)
 
         return sorted(out, key=key)
-
-    def _migrate_legacy(self, raw: list[dict]) -> None:
-        """Early stores kept the commit message and hunks inline in each change
-        file. Move them into a Source and leave a 1:1 Change behind."""
-        for d in raw:
-            if "hunks" not in d:
-                continue
-            source = Source(
-                id=d["id"],
-                message=d.get("message") or d["title"],
-                hunks=[Hunk(**h) for h in d["hunks"]],
-                seq=self.next_seq(),
-            )
-            self.save_source(source)
-            self.save_change(
-                Change(
-                    id=d["id"],
-                    title=d["title"],
-                    hunk_ids=[source.hunk_id(i) for i in range(len(source.hunks))],
-                    answers=d.get("answers", {}),
-                )
-            )
 
 
 def _note_num(note_id: str) -> int:
@@ -266,25 +228,42 @@ def _note_num(note_id: str) -> int:
     return int(digits) if digits.isdigit() else 1 << 30
 
 
-def _source_of(hunk_id: str) -> str:
-    try:
-        return split_hunk_id(hunk_id)[0]
-    except ValueError:
-        return ""
+class Resolved(NamedTuple):
+    """A delta together with what it points at. `dest` is a move's destination
+    file (None for every other delta)."""
+
+    source: Source
+    file: FileDiff
+    delta: Delta
+    dest: FileDiff | None = None
+
+    @property
+    def numbers(self) -> list[int]:
+        return parse_lines(self.delta.lines, self.file.count)
+
+    @property
+    def to_numbers(self) -> list[int]:
+        if self.dest is None:
+            return []
+        return parse_lines(self.delta.to_lines, self.dest.count)
 
 
-def resolve_hunks(
-    change: Change, sources: dict[str, Source]
-) -> list[tuple[Source, int, Hunk]]:
-    """The change's hunks in review order as (source, 0-based index, hunk).
-    Ids that no longer resolve are skipped rather than crashing the viewer."""
+def resolve_deltas(change: Change, sources: dict[str, Source]) -> list[Resolved]:
+    """The change's deltas in review order. Ones that no longer resolve (commit
+    re-ingested differently, file or lines gone) are skipped rather than
+    crashing the viewer."""
     out = []
-    for hid in change.hunk_ids:
+    for d in change.deltas:
+        src = sources.get(d.commit)
+        file = src.file(d.path) if src else None
+        dest = src.file(d.to_path) if src and d.moved else None
+        if not (src and file) or (d.moved and dest is None):
+            continue
         try:
-            sid, idx = split_hunk_id(hid)
+            parse_lines(d.lines, file.count)
+            if dest is not None:
+                parse_lines(d.to_lines, dest.count)
         except ValueError:
             continue
-        src = sources.get(sid)
-        if src and idx < len(src.hunks):
-            out.append((src, idx, src.hunks[idx]))
+        out.append(Resolved(src, file, d, dest))
     return out

@@ -8,9 +8,11 @@ import sys
 import time
 
 from overseer import gitdiff
-from overseer.model import QUESTIONS, RISKS, Link
+from overseer.deltaview import delta_rows, new_range, plain
+from overseer.model import QUESTIONS, RISKS, Link, format_lines, is_changed
+from overseer.moves import find_moves
 from overseer.planning import PlanError, apply_plan, default_change
-from overseer.store import Store, _source_of, resolve_hunks, valid_changeset_name
+from overseer.store import Store, resolve_deltas, valid_reviewset_name
 
 
 def _err(msg: str) -> int:
@@ -22,27 +24,24 @@ def _ingest(store: Store, args: argparse.Namespace) -> int:
     try:
         shas = gitdiff.resolve_commits(args.rev)
         for sha in shas:
-            src = gitdiff.commit_to_source(sha, context=args.context)
+            src = gitdiff.commit_to_source(sha)
             old = store.load_source(src.id)
-            if old and old.hunks == src.hunks:
+            if old and old.files == src.files:
                 print(f"{src.id} already ingested")
                 continue
             if old:
                 if not args.force:
                     return _err(
-                        f"{src.id} already ingested with different hunks "
-                        "(different --context?); use --force to replace it and "
-                        "discard its changes"
+                        f"{src.id} already ingested with different content; "
+                        "use --force to replace it and discard its changes"
                     )
                 doomed = [
                     c
                     for c in store.changes()
-                    if any(_source_of(h) == src.id for h in c.hunk_ids)
+                    if any(d.commit == src.id for d in c.deltas)
                 ]
                 spanning = [
-                    c.id
-                    for c in doomed
-                    if any(_source_of(h) != src.id for h in c.hunk_ids)
+                    c.id for c in doomed if any(d.commit != src.id for d in c.deltas)
                 ]
                 if spanning:
                     return _err(
@@ -56,8 +55,8 @@ def _ingest(store: Store, args: argparse.Namespace) -> int:
                 src.seq = store.next_seq()
             store.save_source(src)
             store.save_change(default_change(src))
-            lines = sum(len(h.lines) for h in src.hunks)
-            print(f"{src.id} {src.title} ({len(src.hunks)} hunks, {lines} lines)")
+            n = sum(f.count for f in src.files)
+            print(f"{src.id} {src.title} ({len(src.files)} files, {n} changed lines)")
     except gitdiff.GitError as e:
         return _err(str(e))
     return 0
@@ -68,17 +67,62 @@ def _show(store: Store, args: argparse.Namespace) -> int:
     if not src:
         return _err(f"unknown commit {args.source!r} (ingest it first)")
     if args.json:
-        data = src.to_dict()
-        for i, h in enumerate(data["hunks"]):
-            h["id"] = src.hunk_id(i)
-        json.dump(data, sys.stdout, indent=2)
+        files = []
+        for f in src.files:
+            n, lines = 0, []
+            for line in f.lines:
+                if is_changed(line):
+                    n += 1
+                lines.append({"n": n if is_changed(line) else None, "text": line})
+            files.append({"path": f.path, "changed": f.count, "lines": lines})
+        json.dump(
+            {
+                "id": src.id,
+                "message": src.message,
+                "files": files,
+                "possible_moves": [
+                    {
+                        "path": m.path,
+                        "lines": format_lines(m.lines),
+                        "moved_to": {
+                            "path": m.to_path,
+                            "lines": format_lines(m.to_lines),
+                        },
+                    }
+                    for m in find_moves(src)
+                ],
+            },
+            sys.stdout,
+            indent=2,
+        )
         print()
         return 0
     print(f"commit {src.id}\n\n{src.message}\n")
-    for i, h in enumerate(src.hunks):
-        print(f"== {src.hunk_id(i)}  {h.path}  {h.header}")
-        for line in h.lines:
-            print(line)
+    print(
+        "Changed lines (+, -) are numbered per file; a plan's deltas pick them "
+        "by number.\n"
+    )
+    for f in src.files:
+        print(f"== {f.path}  (changed lines 1-{f.count})")
+        n = 0
+        for line in f.lines:
+            if is_changed(line):
+                n += 1
+                print(f"{n:>4} {line}")
+            else:
+                print(f"     {line}")
+        print()
+    moves = find_moves(src)
+    if moves:
+        print(
+            "Possible moves (removed lines that reappear, ignoring indentation). "
+            "If one is a real move, give its delta `moved_to` in the plan:"
+        )
+        for m in moves:
+            print(
+                f"  {m.path} lines {format_lines(m.lines)} -> "
+                f"{m.to_path} lines {format_lines(m.to_lines)}  ({m.size} lines)"
+            )
         print()
     return 0
 
@@ -97,7 +141,7 @@ def _plan(store: Store, args: argparse.Namespace) -> int:
         print("nothing was written", file=sys.stderr)
         return 1
     for c in changes:
-        print(f"{c.id} {c.title} ({len(c.hunk_ids)} hunks)")
+        print(f"{c.id} {c.title} ({len(c.deltas)} deltas)")
     return 0
 
 
@@ -117,12 +161,13 @@ def _record(store: Store, args: argparse.Namespace) -> int:
         return _err(f"{change.risk} needs --risk-reason")
     if args.question:
         change.answers[args.question] = args.text
-    if bool(args.hunk) != (args.summary is not None):
-        return _err("--hunk and --summary must be given together")
-    if args.hunk:
-        if args.hunk not in change.hunk_ids:
-            return _err(f"{args.hunk} is not a hunk of {change.id}")
-        change.hunk_summaries[args.hunk] = args.summary.strip()
+    if bool(args.delta) != (args.summary is not None):
+        return _err("--delta and --summary must be given together")
+    if args.delta:
+        delta = change.delta(args.delta)
+        if not delta:
+            return _err(f"{args.delta} is not a delta of {change.id}")
+        delta.summary = args.summary.strip()
     store.save_change(change)
     return 0
 
@@ -135,10 +180,11 @@ def _link(store: Store, args: argparse.Namespace) -> int:
     line = int(tail) if path and tail.isdigit() and int(tail) > 0 else None
     if line is None:
         path = args.target
-    if args.hunk:
-        if args.hunk not in change.hunk_ids:
-            return _err(f"{args.hunk} is not a hunk of {change.id}")
-        links = change.hunk_links.setdefault(args.hunk, [])
+    if args.delta:
+        delta = change.delta(args.delta)
+        if not delta:
+            return _err(f"{args.delta} is not a delta of {change.id}")
+        links = delta.links
     else:
         links = change.links
     rev = gitdiff.head_rev()
@@ -170,19 +216,31 @@ def _note_dict(note, changes, sources) -> dict:
     if note.kind == "change":
         change = next((c for c in changes if c.id == note.ref), None)
         ctx = {"change_title": change.title} if change else {"stale": True}
-    elif note.kind == "hunk":
-        owner = next((c for c in changes if note.ref in c.hunk_ids), None)
+    elif note.kind == "delta":
+        owner = next((c for c in changes if note.ref in c.delta_ids), None)
         if owner:
-            for source, idx, hunk in resolve_hunks(owner, sources):
-                if source.hunk_id(idx) == note.ref:
+            for r in resolve_deltas(owner, sources):
+                if r.delta.id == note.ref:
+                    rows = delta_rows(r.file, r.numbers)
+                    span = new_range(rows)
                     ctx = {
                         "change": owner.id,
                         "change_title": owner.title,
-                        "commit": source.id,
-                        "path": hunk.path,
-                        "header": hunk.header,
-                        "lines": hunk.lines,
+                        "commit": r.source.id,
+                        "path": r.delta.path,
+                        "changed_lines": r.delta.lines,
+                        "new_lines": list(span) if span else None,
+                        "diff": plain(rows),
                     }
+                    if r.dest is not None:  # a move: say where it went too
+                        to_rows = delta_rows(r.dest, r.to_numbers)
+                        to_span = new_range(to_rows)
+                        ctx["moved_to"] = {
+                            "path": r.delta.to_path,
+                            "changed_lines": r.delta.to_lines,
+                            "new_lines": list(to_span) if to_span else None,
+                            "diff": plain(to_rows),
+                        }
         ctx = ctx or {"stale": True}
     out["context"] = ctx
     return out
@@ -235,31 +293,31 @@ def _review(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
-def _changeset(store: Store, args: argparse.Namespace) -> int:
+def _reviewset(store: Store, args: argparse.Namespace) -> int:
     name = getattr(args, "name", None)
     if args.action == "current":
         print(store.name)
     elif args.action == "list":
-        for n in store.changeset_names():
+        for n in store.reviewset_names():
             mark = "*" if n == store.name else " "
             print(f"{mark} {n}  ({store.count_changes(n)} changes)")
     elif args.action == "new":
-        if not valid_changeset_name(name):
-            return _err(f"invalid changeset name {name!r}")
-        if store.has_changeset(name):
-            return _err(f"changeset {name!r} already exists")
-        store.create_changeset(name)
+        if not valid_reviewset_name(name):
+            return _err(f"invalid reviewset name {name!r}")
+        if store.has_reviewset(name):
+            return _err(f"reviewset {name!r} already exists")
+        store.create_reviewset(name)
         if args.use:
             store.set_active(name)
         print(f"created {name}" + (" (now active)" if args.use else ""))
     elif args.action == "use":
-        if not store.has_changeset(name):
-            return _err(f"unknown changeset {name!r}")
+        if not store.has_reviewset(name):
+            return _err(f"unknown reviewset {name!r}")
         store.set_active(name)
     elif args.action == "delete":
-        if not store.has_changeset(name):
-            return _err(f"unknown changeset {name!r}")
-        store.delete_changeset(name)
+        if not store.has_reviewset(name):
+            return _err(f"unknown reviewset {name!r}")
+        store.delete_reviewset(name)
         print(f"deleted {name}")
     return 0
 
@@ -267,38 +325,32 @@ def _changeset(store: Store, args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="overseer-cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    # Required, never defaulted to the active changeset: that is whatever the
+    # Required, never defaulted to the active reviewset: that is whatever the
     # human last switched the TUI to, which may be an unrelated review.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
-        "--changeset",
+        "--reviewset",
         metavar="NAME",
         required=True,
-        help="changeset to operate on (see `changeset list`); ingest creates it",
+        help="reviewset to operate on (see `reviewset list`); ingest creates it",
     )
 
     ing = sub.add_parser(
         "ingest",
         parents=[common],
-        help="import commit(s) from git as commits split into hunks",
+        help="import commit(s) from git, one default change per commit",
     )
     ing.add_argument("rev", nargs="?", default="HEAD", help="commit or A..B range")
     ing.add_argument(
-        "--context",
-        type=int,
-        default=3,
-        help="diff context lines (git -U); lower splits hunks more finely",
-    )
-    ing.add_argument(
         "--force",
         action="store_true",
-        help="replace a commit already ingested with different hunks",
+        help="replace a commit already ingested with different content",
     )
 
     show = sub.add_parser(
         "show",
         parents=[common],
-        help="print a commit's message and hunks with their ids",
+        help="print a commit's message and its numbered changed lines",
     )
     show.add_argument("source")
     show.add_argument("--json", action="store_true")
@@ -317,18 +369,18 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--risk-reason")
     rec.add_argument("--question", choices=sorted(QUESTIONS))
     rec.add_argument("--text", help="answer text for --question")
-    rec.add_argument("--hunk", help="hunk id; use with --summary")
-    rec.add_argument("--summary", help="one-sentence summary of --hunk")
+    rec.add_argument("--delta", help="delta id; use with --summary")
+    rec.add_argument("--summary", help="one-sentence summary of --delta")
 
     lnk = sub.add_parser(
         "link",
         parents=[common],
-        help="add related code to a change (or one of its hunks)",
+        help="add related code to a change (or one of its deltas)",
     )
     lnk.add_argument("change_id")
     lnk.add_argument("target", help="PATH or PATH:LINE, relative to the repo root")
     lnk.add_argument("--note", default="", help="why it is related, a few words")
-    lnk.add_argument("--hunk", help="attach to this hunk id instead of the change")
+    lnk.add_argument("--delta", help="attach to this delta id instead of the change")
 
     ls = sub.add_parser("list", parents=[common], help="list changes as JSON")
     ls.add_argument(
@@ -348,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     res.add_argument("note_id")
     res.add_argument("--reply", help="what you did (or why not), shown to the reviewer")
 
-    rv = sub.add_parser("review", help="hand the changeset to the reviewer and wait")
+    rv = sub.add_parser("review", help="hand the reviewset to the reviewer and wait")
     rv_sub = rv.add_subparsers(dest="action", required=True)
     rq = rv_sub.add_parser(
         "request", parents=[common], help="tell the TUI you are awaiting review"
@@ -363,16 +415,16 @@ def main(argv: list[str] | None = None) -> int:
     wt.add_argument("--timeout", type=float, default=0, help="seconds; 0 = forever")
     rv_sub.add_parser("status", parents=[common], help="idle, requested or done")
 
-    cs = sub.add_parser("changeset", help="manage changesets (separate review sets)")
+    cs = sub.add_parser("reviewset", help="manage reviewsets (separate review sets)")
     cs_sub = cs.add_subparsers(dest="action", required=True)
-    cs_sub.add_parser("list", help="list changesets; * marks the active one")
-    cs_sub.add_parser("current", help="print the active changeset's name")
-    new = cs_sub.add_parser("new", help="create an empty changeset")
+    cs_sub.add_parser("list", help="list reviewsets; * marks the active one")
+    cs_sub.add_parser("current", help="print the active reviewset's name")
+    new = cs_sub.add_parser("new", help="create an empty reviewset")
     new.add_argument("name")
     new.add_argument("--use", action="store_true", help="also make it the active one")
-    use = cs_sub.add_parser("use", help="make a changeset active (the TUI follows)")
+    use = cs_sub.add_parser("use", help="make a reviewset active (the TUI follows)")
     use.add_argument("name")
-    dele = cs_sub.add_parser("delete", help="discard a changeset and all its changes")
+    dele = cs_sub.add_parser("delete", help="discard a reviewset and all its changes")
     dele.add_argument("name")
 
     args = parser.parse_args(argv)
@@ -383,18 +435,18 @@ def main(argv: list[str] | None = None) -> int:
         "record": _record,
         "link": _link,
         "list": _list,
-        "changeset": _changeset,
+        "reviewset": _reviewset,
         "notes": _notes,
         "resolve": _resolve,
         "review": _review,
     }[args.cmd]
-    name = getattr(args, "changeset", None)  # absent for `changeset` commands
+    name = getattr(args, "reviewset", None)  # absent for `reviewset` commands
     try:
-        store = Store(changeset=name)
+        store = Store(reviewset=name)
     except ValueError as e:
         return _err(str(e))
-    if name and args.cmd != "ingest" and not store.has_changeset(name):
-        return _err(f"unknown changeset {name!r} (ingest into it first)")
+    if name and args.cmd != "ingest" and not store.has_reviewset(name):
+        return _err(f"unknown reviewset {name!r} (ingest into it first)")
     return handler(store, args)
 
 

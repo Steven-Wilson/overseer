@@ -7,7 +7,7 @@ import pytest
 
 from overseer import cli
 from overseer.gitdiff import GitError, file_at, head_rev
-from overseer.model import Change, Hunk, Link, Source
+from overseer.model import Change, Delta, FileDiff, Link, Source
 from overseer.store import Store
 from overseer.tui.app import OverseerApp
 
@@ -54,40 +54,47 @@ def test_head_rev_and_file_at(repo, tmp_path_factory):
 def test_links_record_the_checkout_they_were_written_in(repo, tmp_path, monkeypatch):
     root, _, v2 = repo
     monkeypatch.setenv("OVERSEER_DIR", str(tmp_path / "ov"))
-    assert cli.main(["ingest", "HEAD", "--changeset", "x"]) == 0
+    assert cli.main(["ingest", "HEAD", "--reviewset", "x"]) == 0
     sha = v2[:7]
     plan = {
         "changes": [
             {
                 "title": "t",
-                "hunks": [f"{sha}:1"],
                 "risk": "green",
                 "related": [{"path": "b.py", "line": 2}],
-                "hunk_related": {f"{sha}:1": [{"path": "b.py", "line": 1}]},
+                "deltas": [
+                    {
+                        "commit": sha,
+                        "path": "b.py",
+                        "related": [{"path": "b.py", "line": 1}],
+                    }
+                ],
             }
         ]
     }
     planfile = tmp_path / "plan.json"
     planfile.write_text(json.dumps(plan))
-    assert cli.main(["plan", str(planfile), "--changeset", "x"]) == 0
-    (change,) = Store(changeset="x").changes()
+    assert cli.main(["plan", str(planfile), "--reviewset", "x"]) == 0
+    (change,) = Store(reviewset="x").changes()
     assert change.links[0].rev == v2
-    assert change.hunk_links[f"{sha}:1"][0].rev == v2
+    assert change.deltas[0].links[0].rev == v2
 
-    assert cli.main(["link", change.id, "b.py:3", "--changeset", "x"]) == 0
-    assert Store(changeset="x").changes()[0].links[-1].rev == v2
+    assert cli.main(["link", change.id, "b.py:3", "--reviewset", "x"]) == 0
+    assert Store(reviewset="x").changes()[0].links[-1].rev == v2
 
 
 def app_with_link(tmp_path, rev, monkeypatch):
     monkeypatch.setenv("EDITOR", "vim")
     monkeypatch.delenv("VISUAL", raising=False)
     store = Store(tmp_path / "ov")
-    store.save_source(Source("s1", "msg", [Hunk("b.py", "@@", ["+x"])], seq=1))
+    store.save_source(
+        Source("s1", "msg", [FileDiff("b.py", ["@@ -1 +1 @@", "+x"])], seq=1)
+    )
     store.save_change(
         Change(
             "s1-01",
             "T",
-            ["s1:1"],
+            [Delta("s1", "b.py", "1")],
             planned=True,
             links=[Link("b.py", 2, "the second line", rev)],
         )

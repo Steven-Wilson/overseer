@@ -31,15 +31,18 @@ def repo(tmp_path):
     return tmp_path
 
 
-def test_commit_to_source_splits_hunks(repo):
+def test_commit_to_source_has_one_file_diff_per_file(repo):
     src = gitdiff.commit_to_source("HEAD", cwd=str(repo))
     assert src.title == "Tweak things"
     assert "Because reasons." in src.message
-    text = [h for h in src.hunks if h.path == "a.txt"]
-    assert len(text) == 2
-    assert "-line 2" in text[0].lines and "+changed [early]" in text[0].lines
-    binary = [h for h in src.hunks if h.path == "b.bin"]
-    assert binary[0].header == "(binary file changed)"
+    assert [f.path for f in src.files] == ["a.txt", "b.bin"]
+    text = src.file("a.txt")
+    # git's two hunks survive only as @@ headers; changed lines are numbered across both
+    assert sum(1 for x in text.lines if x.startswith("@@")) == 2
+    assert text.count == 4
+    assert "-line 2" in text.lines and "+changed [early]" in text.lines
+    assert src.file("b.bin").lines == ["!(binary file changed)"]
+    assert src.file("b.bin").count == 1
 
 
 def test_range_expands_oldest_first(repo):
@@ -55,19 +58,25 @@ def test_root_commit_and_deleted_file(repo):
     (repo / "a.txt").unlink()
     git(repo, "commit", "-qam", "drop")
     src = gitdiff.commit_to_source("HEAD", cwd=str(repo))
-    assert src.hunks and all(h.path == "a.txt" for h in src.hunks)
+    assert [f.path for f in src.files] == ["a.txt"] and src.files[0].count == 40
     root = gitdiff.commit_to_source("HEAD~2", cwd=str(repo))
-    assert root.title == "initial" and root.hunks[0].path == "a.txt"
+    assert root.title == "initial" and root.files[0].path == "a.txt"
 
 
 def test_parse_patch_blank_context_line():
     patch = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n"
-    (hunk,) = parse_patch(patch)
-    assert hunk.lines == [" a", " ", "-b", "+c"]
+    (file,) = parse_patch(patch)
+    assert file.lines == ["@@ -1,3 +1,3 @@", " a", " ", "-b", "+c"]
+
+
+def test_parse_patch_non_text_changes_become_one_changed_line():
+    patch = "diff --git a/x b/x\nnew file mode 100644\nindex 0000000..e69de29\n"
+    (file,) = parse_patch(patch)
+    assert file.lines == ["!(new empty file)"] and file.count == 1
 
 
 def test_ingest_bad_rev(repo, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OVERSEER_DIR", str(tmp_path))
     monkeypatch.chdir(repo)
-    assert cli.main(["ingest", "nope", "--changeset", "default"]) == 1
+    assert cli.main(["ingest", "nope", "--reviewset", "default"]) == 1
     assert "error" in capsys.readouterr().err
