@@ -25,11 +25,12 @@ For a PR, fetch it so the range resolves (e.g. `gh pr checkout` or `git fetch or
    - one purpose per change (a refactor, a behavior change, tests, a rename, config), not one per file;
    - keep mechanical noise (renames, formatting, moved code) separate from logic changes, so the reviewer can skim it;
    - tests go with the behavior they cover unless large;
-   - order changes so each makes sense after the previous one; order hunks within a change the same way;
+   - order changes so each makes sense after the previous one; order hunks within a change the same way
+     (the TUI lists red first, then yellow, unrated, green, keeping your order within each tier; `white` changes are hidden behind a key, so write each change to stand reasonably alone rather than relying on the previous one);
    - a small commit may stay a single change. Do not split for its own sake.
 5. **Explain** each change via `answers`. Valid keys: `mechanical`, `semantic`, `why`, `impact`, `behavior`, `patterns`, `refactor`, `coverage` (the eight review questions). Include only answers you can support from the code and commit message; do not guess intent. For `why`, say so when the commit message gives no reason. Use `patterns`/`refactor` to flag duplication of existing code you actually found. Keep each answer to one or two sentences.
    **Scale commentary to risk** (so rate risk, step 7, first): the reviewer's attention is the scarce resource, and an unanswered question is fine. Do not answer all eight by default; omit any question whose answer is obvious from the title, the diff, or another answer.
-   - `green`: almost nothing, often a single short `mechanical` or `why`, or no answers at all.
+   - `white` and `green`: almost nothing, often a single short `mechanical` or `why`, or no answers at all.
    - `yellow`: only the answers that explain *why it is not green* or that the reviewer needs to judge it (typically `semantic`, `coverage`, `impact`; two to four answers).
    - `red`: the fullest, still short; cover what makes it red and what to check.
 6. **Link related code** so the reviewer can jump straight to what matters. Links are shown in the TUI and opened in `$EDITOR` on Enter. Per change (`related`) or, when it concerns one hunk specifically, per hunk (`hunk_related`, keyed by hunk id, which must belong to that change). Look for:
@@ -40,7 +41,8 @@ For a PR, fetch it so the range resolves (e.g. `gh pr checkout` or `git fetch or
 
    Each link is `{"path": "src/x.py", "line": 42, "note": "why, in a few words"}`; `line` and `note` are optional. Paths are relative to the repo root and refer to the *working tree*, so check the line numbers there (and that the commit you are reviewing matches it). Keep lists short (about 6 or fewer); omit rather than pad. Add one later with `overseer-cli link <change-id> src/x.py:42 --note "..." [--hunk <hunk-id>]`.
 7. **Rate risk** for each change (`risk`, plus `risk_reason` which is required for yellow and red). Risk tells the reviewer where to spend attention:
-   - `green`: very little or no risk; behavior is *verifiably* correct (tests that actually exercise it, or purely mechanical/docs/rename).
+   - `green`: very little or no risk; behavior is *verifiably* correct (tests that actually exercise it, or a purely mechanical rename/move).
+   - `white`: **tests, documentation or comments only**; nothing that can change runtime behavior. The TUI hides these by default (the reviewer presses `t` to see them), so this must be strictly true: if any hunk changes executable code, config, build files or a public signature, even trivially, the change is not white. Give a `risk_reason` that says what it is ("only adds tests; no source touched"). A test-only or docs-only change is white, not green; when tests ride along with the behavior they cover in one change, rate by the code.
    - `yellow`: worth a look; tests cover the behavior only partially, so a manual check may be warranted.
    - `red`: guesswork (you are unsure of the intent), a breaking change, behavior only testable by mocking external services (tests weak or absent), or sweeping impact (many consumers, a core function changed).
 
@@ -62,4 +64,4 @@ For a PR, fetch it so the range resolves (e.g. `gh pr checkout` or `git fetch or
    Every hunk of every commit the plan mentions must be assigned **exactly once**. On any problem nothing is written and each problem is printed; fix the plan and resubmit. A plan may mix hunks from several commits when one logical change spans them (then include all hunks of all those commits).
 9. **Verify**: `overseer-cli list` should show your changes with `"planned": true`.
 
-Later corrections (also with `--changeset`): `overseer-cli record <change-id> --question why --text "..."` `--title "..."`, or `--risk green|yellow|red --risk-reason "..."`. The human views everything with `overseer` (TUI).
+Later corrections (also with `--changeset`): `overseer-cli record <change-id> --question why --text "..."` `--title "..."`, or `--risk green|yellow|red|white --risk-reason "..."`. The human views everything with `overseer` (TUI).

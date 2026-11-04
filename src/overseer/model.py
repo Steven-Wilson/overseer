@@ -42,7 +42,25 @@ RISKS: dict[str, str] = {
         "services (so tests are weak or absent), or sweeping impact "
         "(many consumers, a core function)"
     ),
+    "white": (
+        "tests, documentation or comments only; no runtime behavior can change. "
+        "Hidden by default in the TUI (press t), so it must be strictly true"
+    ),
 }
+
+
+# Review priority, most attention first. Unrated sits between yellow and green:
+# nobody has judged it, so it must not hide below changes known to be safe.
+# White (tests/docs/comments only) is last and hidden by default in the TUI.
+PRIORITY = ("red", "yellow", "", "green", "white")
+
+
+def by_priority(changes: list[Change]) -> list[Change]:
+    """Red, yellow, unrated, green, then white. The sort is stable, so within a tier the
+    given order stands (ingest order, then the agent's plan order, which is the
+    order it wrote them to read as a story)."""
+    rank = {r: i for i, r in enumerate(PRIORITY)}
+    return sorted(changes, key=lambda c: rank.get(c.risk, rank[""]))
 
 
 @dataclass

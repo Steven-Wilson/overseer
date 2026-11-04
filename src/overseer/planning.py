@@ -10,7 +10,7 @@ Plan format:
     {"changes": [{"title": "...",
                   "hunks": ["abc1234:1", "abc1234:4"],
                   "risk": "yellow",
-                  "risk_reason": "required for yellow/red",
+                  "risk_reason": "required unless green",
                   "answers": {"why": "...", "semantic": "..."},
                   "related": [{"path": "src/x.py", "line": 12, "note": "caller"}],
                   "hunk_related": {"abc1234:1": [{"path": "tests/t.py", "line": 3}]}}]}

@@ -113,7 +113,7 @@ def _record(store: Store, args: argparse.Namespace) -> int:
         change.risk = args.risk
     if args.risk_reason:
         change.risk_reason = args.risk_reason
-    if change.risk in ("yellow", "red") and not change.risk_reason:
+    if change.risk in RISKS and change.risk != "green" and not change.risk_reason:
         return _err(f"{change.risk} needs --risk-reason")
     if args.question:
         change.answers[args.question] = args.text

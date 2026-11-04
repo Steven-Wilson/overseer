@@ -12,7 +12,16 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 from overseer.editor import build_command, is_gui, resolve_editor
-from overseer.model import QUESTIONS, RISKS, Change, Hunk, Link, Note, Source
+from overseer.model import (
+    QUESTIONS,
+    RISKS,
+    Change,
+    Hunk,
+    Link,
+    Note,
+    Source,
+    by_priority,
+)
 from overseer.store import Store, resolve_hunks
 
 POLL_SECONDS = 1.0
@@ -22,6 +31,10 @@ def risk_badge(change: Change) -> Text:
     if change.risk not in RISKS:
         return Text("○ unrated", style="dim")
     return Text(f"● {change.risk.upper()}", style=f"bold {change.risk}")
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
 
 
 def append_note(out: Text, note: Note, where: str) -> None:
@@ -161,6 +174,7 @@ class OverseerApp(App):
     CSS = """
     #left { width: 35%; min-width: 24; }
     #changes { height: 1fr; border: round $panel; }
+    #changes Static { text-wrap: nowrap; text-overflow: ellipsis; }
     #changesets { display: none; height: auto; max-height: 12; border: round $accent; }
     #changesets.open { display: block; }
     #changesets.confirm { border: round $error; }
@@ -174,6 +188,7 @@ class OverseerApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
+        Binding("t", "toggle_text", "Tests/text"),
         Binding("c", "changesets", "Changesets"),
         Binding("d", "delete_changeset", "Delete changeset"),
         Binding("n", "note('hunk')", "Note on hunk"),
@@ -195,10 +210,14 @@ class OverseerApp(App):
         self._changes: list[Change] = []
         self._sources: dict[str, Source] = {}
         self._name = self.store.name  # changeset being shown
-        self._remembered: dict[str, str | None] = {}  # selection per changeset
+        self._other = 0  # changes in the view that is not showing
+        self._show_text = False  # False: code changes; True: white (tests/text) only
+        self._view_key = (self._name, False)
+        self._remembered: dict[tuple[str, bool], str | None] = {}  # selection per view
         self._selected: str | None = None  # change id, stable across refreshes
         self._hunk = 0
         self._shown_rows: list | None = None  # what the links list was built from
+        self._rebuilding = False  # ignore highlight events while the list is rebuilt
         self._notes: list[Note] = []
         self._review: dict = {}
         self._note_target: tuple[str, str] | None = None  # (kind, ref) being typed
@@ -218,7 +237,6 @@ class OverseerApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.query_one("#changes").border_title = "Changes"
         self.query_one("#changesets").border_title = PICKER_TITLE
         self.query_one("#links").border_title = "Related code"
         await self.action_refresh()
@@ -228,11 +246,14 @@ class OverseerApp(App):
 
     async def action_refresh(self) -> None:
         # The active changeset can move under us (`overseer-cli changeset use`).
-        switched = self.store.name != self._name
+        # Switching changeset or code/text view both swap the whole list.
+        view_key = (self.store.name, self._show_text)
+        switched = view_key != self._view_key
         if switched:
-            self._remembered[self._name] = self._selected
+            self._remembered[self._view_key] = self._selected
+            self._view_key = view_key
             self._name = self.store.name
-            self._selected = self._remembered.get(self._name)
+            self._selected = self._remembered.get(view_key)
             self._hunk = 0
             self._shown_rows = None
         review = self.store.review()
@@ -246,7 +267,14 @@ class OverseerApp(App):
             else ""
         )
         sources = self.store.sources()
-        changes = self.store.changes(sources)
+        everything = by_priority(self.store.changes(sources))
+        changes = [c for c in everything if (c.risk == "white") == self._show_text]
+        other = self._other = len(everything) - len(changes)
+        self.query_one("#changes").border_title = (
+            f"Tests / text  ·  t: back to code ({other})"
+            if self._show_text
+            else "Changes" + (f"  ·  t: {other} tests/text hidden" if other else "")
+        )
         notes = self.store.notes()
         same_changes = [c.to_dict() for c in changes] == [
             c.to_dict() for c in self._changes
@@ -262,29 +290,43 @@ class OverseerApp(App):
             return
         self._changes, self._sources, self._notes = changes, sources, notes
         view = self.query_one("#changes", ListView)
-        await view.clear()
-        await view.extend(ListItem(Static(self._label(c))) for c in changes)
+        # clear() yields to the event loop, which delivers a "nothing highlighted"
+        # event; without this guard it would reset the selection to the top.
+        keep = self._selected
+        self._rebuilding = True
+        try:
+            await view.clear()
+            await view.extend(ListItem(Static(self._label(c))) for c in changes)
+        finally:
+            self._rebuilding = False
         ids = [c.id for c in changes]
-        if self._selected in ids:
-            view.index = ids.index(self._selected)
+        if keep in ids:
+            view.index = ids.index(keep)
         elif changes:
             view.index = 0
+        self._selected = keep if keep in ids else (ids[0] if ids else None)
         await self._show()
 
     def _label(self, change: Change) -> Text:
+        """Two lines: risk and title, then size (hunks, files) and notes."""
         label = Text()
         if change.risk in RISKS:
-            label.append("● ", style=f"bold {change.risk}")
+            label.append("● ", style=f"bold {change.risk}")  # white is a rich color
         else:
             label.append("○ ", style="dim")
         label.append(change.title)
         if not change.planned:
             label.append(" (whole commit)", style="dim yellow")
+        hunks = resolve_hunks(change, self._sources)
+        files = len({h.path for _, _, h in hunks})
+        label.append(
+            f"\n  {_plural(len(hunks), 'hunk')} · {_plural(files, 'file')}", style="dim"
+        )
         opened, addressed = note_count(change, self._notes)
         if opened:
-            label.append(f" ✎{opened}", style="bold yellow")
+            label.append(f" · ✎{opened}", style="bold yellow")
         if addressed:  # resolved notes stay visible, just quieter
-            label.append(f" ✓{addressed}", style="green")
+            label.append(f" · ✓{addressed}", style="green")
         return label
 
     def _current(self) -> Change | None:
@@ -317,6 +359,14 @@ class OverseerApp(App):
         if change:
             hunks = resolve_hunks(change, self._sources)
             detail.update(render_change(change, hunks, self._hunk, self._notes))
+        elif self._other:
+            where = "code" if self._show_text else "tests/text"
+            detail.update(
+                Text(
+                    f"No changes here. {self._other} {where} change(s): press t.",
+                    style="dim",
+                )
+            )
         else:
             detail.update("")
         await self._sync_links()
@@ -347,7 +397,7 @@ class OverseerApp(App):
         view.index = next((i for i, (k, _) in enumerate(rows) if k == "link"), None)
 
     async def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
-        if event.list_view.id != "changes":
+        if event.list_view.id != "changes" or self._rebuilding:
             return
         idx = event.list_view.index
         selected = (
@@ -367,6 +417,10 @@ class OverseerApp(App):
             self.store.set_active(event.item.changeset)
             await self.action_close_changesets()
             await self.action_refresh()
+
+    async def action_toggle_text(self) -> None:
+        self._show_text = not self._show_text
+        await self.action_refresh()
 
     async def action_changesets(self) -> None:
         picker = self.query_one("#changesets", ListView)
@@ -479,7 +533,8 @@ class OverseerApp(App):
         index = picker.index or 0
         await self._fill_picker(index)
         await self.action_refresh()  # the viewed changeset may be the one deleted
-        self._remembered.pop(name, None)
+        for text_view in (False, True):
+            self._remembered.pop((name, text_view), None)
 
     async def action_close_changesets(self) -> None:
         picker = self.query_one("#changesets", ChangesetList)
