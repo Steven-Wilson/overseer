@@ -28,6 +28,21 @@ QUESTIONS: dict[str, str] = {
 }
 
 
+# Risk of a change to the reviewer: how much human attention it needs.
+RISKS: dict[str, str] = {
+    "green": "very little or no risk; behavior is verifiably correct",
+    "yellow": (
+        "worth a look; tests verify behavior only partially, "
+        "so a manual check may be warranted"
+    ),
+    "red": (
+        "guesswork, a breaking change, only testable by mocking external "
+        "services (so tests are weak or absent), or sweeping impact "
+        "(many consumers, a core function)"
+    ),
+}
+
+
 @dataclass
 class Hunk:
     path: str
@@ -75,6 +90,8 @@ class Change:
     hunk_ids: list[str] = field(default_factory=list)  # review order
     answers: dict[str, str] = field(default_factory=dict)
     planned: bool = False  # False = default 1:1 wrapper, not yet decomposed
+    risk: str = ""  # a key of RISKS; "" = not yet rated
+    risk_reason: str = ""  # required for yellow/red
     position: int = 0  # index within its plan
 
     def to_dict(self) -> dict:

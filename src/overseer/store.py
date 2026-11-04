@@ -67,8 +67,12 @@ class Store:
 
     def changes(self, sources: dict[str, Source] | None = None) -> list[Change]:
         """Display order: by earliest ingested source, then plan position."""
+        raw = self._read_all(self.changes_dir)
+        if any("hunks" in d for d in raw):
+            self._migrate_legacy(raw)
+            raw, sources = self._read_all(self.changes_dir), None
         sources = self.sources() if sources is None else sources
-        out = [Change.from_dict(d) for d in self._read_all(self.changes_dir)]
+        out = [Change.from_dict(d) for d in raw]
 
         def key(c: Change) -> tuple:
             seqs = [
@@ -79,6 +83,28 @@ class Store:
             return (min(seqs, default=1 << 30), c.position, c.id)
 
         return sorted(out, key=key)
+
+    def _migrate_legacy(self, raw: list[dict]) -> None:
+        """Early stores kept the commit message and hunks inline in each change
+        file. Move them into a Source and leave a 1:1 Change behind."""
+        for d in raw:
+            if "hunks" not in d:
+                continue
+            source = Source(
+                id=d["id"],
+                message=d.get("message") or d["title"],
+                hunks=[Hunk(**h) for h in d["hunks"]],
+                seq=self.next_seq(),
+            )
+            self.save_source(source)
+            self.save_change(
+                Change(
+                    id=d["id"],
+                    title=d["title"],
+                    hunk_ids=[source.hunk_id(i) for i in range(len(source.hunks))],
+                    answers=d.get("answers", {}),
+                )
+            )
 
 
 def _source_of(hunk_id: str) -> str:

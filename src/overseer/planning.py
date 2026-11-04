@@ -9,12 +9,14 @@ Plan format:
 
     {"changes": [{"title": "...",
                   "hunks": ["abc1234:1", "abc1234:4"],
+                  "risk": "yellow",
+                  "risk_reason": "required for yellow/red",
                   "answers": {"why": "...", "semantic": "..."}}]}
 """
 
 from __future__ import annotations
 
-from overseer.model import QUESTIONS, Change, Source, split_hunk_id
+from overseer.model import QUESTIONS, RISKS, Change, Source, split_hunk_id
 from overseer.store import Store, _source_of
 
 
@@ -52,6 +54,13 @@ def _validate_shape(plan: object) -> list[str]:
             problems.append(f"{where}: needs a non-empty hunks list")
         elif not all(isinstance(h, str) for h in hunks):
             problems.append(f"{where}: hunks must be strings like 'abc1234:1'")
+        risk, reason = c.get("risk"), c.get("risk_reason", "")
+        if risk not in RISKS:
+            problems.append(f"{where}: risk must be one of {', '.join(RISKS)}")
+        elif risk != "green" and not (isinstance(reason, str) and reason.strip()):
+            problems.append(f"{where}: risk_reason is required for {risk}")
+        elif not isinstance(reason, str):
+            problems.append(f"{where}: risk_reason must be a string")
         answers = c.get("answers", {})
         if not isinstance(answers, dict):
             problems.append(f"{where}: answers must be an object")
@@ -133,6 +142,8 @@ def apply_plan(store: Store, plan: object) -> list[Change]:
                 answers=dict(c.get("answers", {})),
                 planned=True,
                 position=n,
+                risk=c["risk"],
+                risk_reason=c.get("risk_reason", "").strip(),
             )
         )
     for c in new:

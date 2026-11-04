@@ -5,10 +5,16 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Footer, Header, ListItem, ListView, Static
 
-from overseer.model import QUESTIONS, Change, Hunk, Source
+from overseer.model import QUESTIONS, RISKS, Change, Hunk, Source
 from overseer.store import Store, resolve_hunks
 
 POLL_SECONDS = 1.0
+
+
+def risk_badge(change: Change) -> Text:
+    if change.risk not in RISKS:
+        return Text("○ unrated", style="dim")
+    return Text(f"● {change.risk.upper()}", style=f"bold {change.risk}")
 
 
 def render_change(
@@ -18,6 +24,10 @@ def render_change(
     hunk. Built as `Text` (not markup) because diff content is full of brackets."""
     out = Text()
     out.append(f"{change.title}\n", style="bold underline")
+    out.append_text(risk_badge(change))
+    if change.risk_reason:
+        out.append(f"  {change.risk_reason}")
+    out.append("\n")
     if not change.planned:
         out.append(
             f"Not yet decomposed: whole commit, {len(hunks)} hunks. "
@@ -105,7 +115,12 @@ class OverseerApp(App):
 
     @staticmethod
     def _label(change: Change) -> Text:
-        label = Text(change.title)
+        label = Text()
+        if change.risk in RISKS:
+            label.append("● ", style=f"bold {change.risk}")
+        else:
+            label.append("○ ", style="dim")
+        label.append(change.title)
         if not change.planned:
             label.append(" (whole commit)", style="dim yellow")
         return label

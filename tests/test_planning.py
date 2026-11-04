@@ -24,8 +24,13 @@ def store(tmp_path):
 def test_plan_replaces_default_and_preserves_order(store):
     plan = {
         "changes": [
-            {"title": "second half", "hunks": ["aaa:3"], "answers": {"why": "w"}},
-            {"title": "first half", "hunks": ["aaa:1", "aaa:2"]},
+            {
+                "risk": "green",
+                "title": "second half",
+                "hunks": ["aaa:3"],
+                "answers": {"why": "w"},
+            },
+            {"risk": "green", "title": "first half", "hunks": ["aaa:1", "aaa:2"]},
         ]
     }
     new = apply_plan(store, plan)
@@ -43,6 +48,7 @@ def test_change_may_span_sources(store):
             "changes": [
                 {
                     "title": "both",
+                    "risk": "green",
                     "hunks": [f"{s}:{i}" for s in ("aaa", "bbb") for i in (1, 2, 3)],
                 }
             ]
@@ -52,7 +58,16 @@ def test_change_may_span_sources(store):
     # replanning only one of the sources now would orphan the other's hunks
     with pytest.raises(PlanError, match="also covers bbb"):
         apply_plan(
-            store, {"changes": [{"title": "t", "hunks": ["aaa:1", "aaa:2", "aaa:3"]}]}
+            store,
+            {
+                "changes": [
+                    {
+                        "risk": "green",
+                        "title": "t",
+                        "hunks": ["aaa:1", "aaa:2", "aaa:3"],
+                    }
+                ]
+            },
         )
 
 
@@ -60,25 +75,46 @@ def test_change_may_span_sources(store):
     "plan, message",
     [
         (
-            {"changes": [{"title": "t", "hunks": ["aaa:1", "aaa:2"]}]},
+            {"changes": [{"risk": "green", "title": "t", "hunks": ["aaa:1", "aaa:2"]}]},
             "unassigned hunks in aaa: aaa:3",
         ),
         (
             {
                 "changes": [
-                    {"title": "t", "hunks": ["aaa:1", "aaa:1", "aaa:2", "aaa:3"]}
+                    {
+                        "risk": "green",
+                        "title": "t",
+                        "hunks": ["aaa:1", "aaa:1", "aaa:2", "aaa:3"],
+                    }
                 ]
             },
             "already assigned",
         ),
-        ({"changes": [{"title": "t", "hunks": ["aaa:9"]}]}, "does not exist"),
-        ({"changes": [{"title": "t", "hunks": ["zzz:1"]}]}, "unknown source"),
-        ({"changes": [{"title": "t", "hunks": ["nocolon"]}]}, "malformed"),
-        ({"changes": [{"title": "", "hunks": ["aaa:1"]}]}, "missing title"),
+        (
+            {"changes": [{"risk": "green", "title": "t", "hunks": ["aaa:9"]}]},
+            "does not exist",
+        ),
+        (
+            {"changes": [{"risk": "green", "title": "t", "hunks": ["zzz:1"]}]},
+            "unknown source",
+        ),
+        (
+            {"changes": [{"risk": "green", "title": "t", "hunks": ["nocolon"]}]},
+            "malformed",
+        ),
+        (
+            {"changes": [{"risk": "green", "title": "", "hunks": ["aaa:1"]}]},
+            "missing title",
+        ),
         (
             {
                 "changes": [
-                    {"title": "t", "hunks": ["aaa:1"], "answers": {"bogus": "x"}}
+                    {
+                        "risk": "green",
+                        "title": "t",
+                        "hunks": ["aaa:1"],
+                        "answers": {"bogus": "x"},
+                    }
                 ]
             },
             "unknown question",
@@ -130,8 +166,8 @@ def test_end_to_end_ingest_show_plan(tmp_path, monkeypatch, capsys):
 
     plan = {
         "changes": [
-            {"title": "tweak A", "hunks": [f"{sha}:1"]},
-            {"title": "tweak B", "hunks": [f"{sha}:2"]},
+            {"risk": "green", "title": "tweak A", "hunks": [f"{sha}:1"]},
+            {"risk": "green", "title": "tweak B", "hunks": [f"{sha}:2"]},
         ]
     }
     planfile = tmp_path / "plan.json"
@@ -147,3 +183,49 @@ def test_end_to_end_ingest_show_plan(tmp_path, monkeypatch, capsys):
     assert cli.main(["list"]) == 0
     (c,) = json.loads(capsys.readouterr().out)
     assert c["planned"] is False and len(c["hunk_ids"]) == 2
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        ({"title": "t", "hunks": ["aaa:1", "aaa:2", "aaa:3"]}, "risk must be one of"),
+        (
+            {"title": "t", "hunks": ["aaa:1", "aaa:2", "aaa:3"], "risk": "blue"},
+            "risk must be",
+        ),
+        (
+            {"title": "t", "hunks": ["aaa:1", "aaa:2", "aaa:3"], "risk": "red"},
+            "risk_reason is required for red",
+        ),
+        (
+            {
+                "title": "t",
+                "hunks": ["aaa:1", "aaa:2", "aaa:3"],
+                "risk": "yellow",
+                "risk_reason": " ",
+            },
+            "required for yellow",
+        ),
+    ],
+)
+def test_risk_validation(store, change, message):
+    with pytest.raises(PlanError, match=message):
+        apply_plan(store, {"changes": [change]})
+
+
+def test_risk_is_stored(store):
+    (c,) = apply_plan(
+        store,
+        {
+            "changes": [
+                {
+                    "title": "t",
+                    "hunks": ["aaa:1", "aaa:2", "aaa:3"],
+                    "risk": "red",
+                    "risk_reason": " core fn ",
+                }
+            ]
+        },
+    )
+    assert store.load_change(c.id).risk == "red"
+    assert store.load_change(c.id).risk_reason == "core fn"

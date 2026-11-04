@@ -7,7 +7,7 @@ import json
 import sys
 
 from overseer import gitdiff
-from overseer.model import QUESTIONS
+from overseer.model import QUESTIONS, RISKS
 from overseer.planning import PlanError, apply_plan, default_change
 from overseer.store import Store, _source_of
 
@@ -108,6 +108,12 @@ def _record(store: Store, args: argparse.Namespace) -> int:
         return _err(f"unknown change {args.change_id!r}")
     if args.title:
         change.title = args.title
+    if args.risk:
+        change.risk = args.risk
+    if args.risk_reason:
+        change.risk_reason = args.risk_reason
+    if change.risk in ("yellow", "red") and not change.risk_reason:
+        return _err(f"{change.risk} needs --risk-reason")
     if args.question:
         change.answers[args.question] = args.text
     store.save_change(change)
@@ -151,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
     rec = sub.add_parser("record", help="edit an existing change")
     rec.add_argument("change_id")
     rec.add_argument("--title")
+    rec.add_argument("--risk", choices=list(RISKS))
+    rec.add_argument("--risk-reason")
     rec.add_argument("--question", choices=sorted(QUESTIONS))
     rec.add_argument("--text", help="answer text for --question")
 

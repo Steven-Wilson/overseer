@@ -16,7 +16,15 @@ def seed(store):
         )
     )
     store.save_change(
-        Change("s1-01", "Part one", ["s1:2"], {"why": "because"}, planned=True)
+        Change(
+            "s1-01",
+            "Part one",
+            ["s1:2"],
+            {"why": "because"},
+            planned=True,
+            risk="red",
+            risk_reason="core fn",
+        )
     )
     store.save_change(Change("s1-02", "Part two", ["s1:1", "s1:2"], planned=True))
 
@@ -72,3 +80,15 @@ async def test_panes_are_side_by_side(tmp_path):
         left = app.query_one("#changes").region
         right = app.query_one("#detail-pane").region
         assert left.right <= right.x and left.y == right.y
+
+
+async def test_risk_is_shown(tmp_path):
+    store = Store(tmp_path)
+    seed(store)
+    app = OverseerApp(store)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "RED" in text(app) and "core fn" in text(app)
+        await pilot.press("down")
+        await pilot.pause()
+        assert "unrated" in text(app)

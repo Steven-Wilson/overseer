@@ -37,7 +37,7 @@ TUI framework is **Textual** (async, handles long-running sessions, has a headle
 Two-layer data model (`overseer/model.py`, the contract between CLI and TUI):
 
 - **`Source`** — raw ingested material: currently one git commit (message + `Hunk`s). Hunks are addressed `<7-char sha>:<1-based n>`. Immutable once ingested.
-- **`Change`** — the human-sized review unit. References hunk ids (possibly spanning sources), carries `answers` to the eight `QUESTIONS`. Ingest creates one default `Change` per commit (`planned=False`, shown as "whole commit"); decomposing replaces it with several (`planned=True`, ids `<sha>-NN`).
+- **`Change`** — the human-sized review unit. References hunk ids (possibly spanning sources), carries `answers` to the eight `QUESTIONS` and a `risk` (`RISKS`: green/yellow/red; rubric in `model.py` and the skill; `risk_reason` required for yellow/red, enforced by `apply_plan` and `record`; `""` = unrated, shown as `○`). Ingest creates one default `Change` per commit (`planned=False`, shown as "whole commit"); decomposing replaces it with several (`planned=True`, ids `<sha>-NN`).
 
 Modules:
 
