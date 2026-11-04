@@ -96,7 +96,7 @@ def test_change_may_span_sources(store):
         ),
         (
             {"changes": [{"risk": "green", "title": "t", "hunks": ["zzz:1"]}]},
-            "unknown source",
+            "unknown commit",
         ),
         (
             {"changes": [{"risk": "green", "title": "t", "hunks": ["nocolon"]}]},

@@ -19,6 +19,8 @@ The store (`.overseer/`, gitignored) lives in the cwd unless `OVERSEER_DIR` is s
 
 ## Purpose
 
+**Vocabulary** lives in the README's Vocabulary table and is the one source of truth for terms (reviewer, agent, commit, hunk, change, whole commit, decompose, plan, answer, related code, risk, changeset, note, baseline, ...). Use it in the TUI, CLI messages, docs and both skills, and update the table first when adding a concept. `Source` and `Link` are internal names; user-facing text says "commit" and "related code".
+
 Overseer helps humans review agentic coding changes at a higher level than line diffs. For each engineering change it should answer:
 
 1. What changed mechanically?

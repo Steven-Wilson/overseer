@@ -46,7 +46,7 @@ def _ingest(store: Store, args: argparse.Namespace) -> int:
                 ]
                 if spanning:
                     return _err(
-                        f"changes {', '.join(spanning)} span other sources; "
+                        f"changes {', '.join(spanning)} span other commits; "
                         "re-plan them instead of --force"
                     )
                 for c in doomed:
@@ -66,7 +66,7 @@ def _ingest(store: Store, args: argparse.Namespace) -> int:
 def _show(store: Store, args: argparse.Namespace) -> int:
     src = store.load_source(args.source)
     if not src:
-        return _err(f"unknown source {args.source!r} (ingest it first)")
+        return _err(f"unknown commit {args.source!r} (ingest it first)")
     if args.json:
         data = src.to_dict()
         for i, h in enumerate(data["hunks"]):
@@ -74,7 +74,7 @@ def _show(store: Store, args: argparse.Namespace) -> int:
         json.dump(data, sys.stdout, indent=2)
         print()
         return 0
-    print(f"source {src.id}\n\n{src.message}\n")
+    print(f"commit {src.id}\n\n{src.message}\n")
     for i, h in enumerate(src.hunks):
         print(f"== {src.hunk_id(i)}  {h.path}  {h.header}")
         for line in h.lines:
@@ -218,7 +218,7 @@ def _review(store: Store, args: argparse.Namespace) -> int:
         print()
     elif args.action == "request":
         store.set_review("requested", args.message or "")
-        print("review requested; run `review wait` to block until the human is done")
+        print("review requested; run `review wait` to block until the reviewer is done")
     elif args.action == "wait":
         if review["state"] == "idle":
             return _err("no review requested; run `review request` first")
@@ -226,7 +226,7 @@ def _review(store: Store, args: argparse.Namespace) -> int:
         while store.review()["state"] != "done":
             if deadline is not None and time.monotonic() >= deadline:
                 print(
-                    "still waiting for the human; run `review wait` again",
+                    "still waiting for the reviewer; run `review wait` again",
                     file=sys.stderr,
                 )
                 return 3
@@ -280,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     ing = sub.add_parser(
         "ingest",
         parents=[common],
-        help="import commit(s) from git as sources split into hunks",
+        help="import commit(s) from git as commits split into hunks",
     )
     ing.add_argument("rev", nargs="?", default="HEAD", help="commit or A..B range")
     ing.add_argument(
@@ -289,10 +289,16 @@ def main(argv: list[str] | None = None) -> int:
         default=3,
         help="diff context lines (git -U); lower splits hunks more finely",
     )
-    ing.add_argument("--force", action="store_true", help="replace changed source")
+    ing.add_argument(
+        "--force",
+        action="store_true",
+        help="replace a commit already ingested with different hunks",
+    )
 
     show = sub.add_parser(
-        "show", parents=[common], help="print a source's hunks with their ids"
+        "show",
+        parents=[common],
+        help="print a commit's message and hunks with their ids",
     )
     show.add_argument("source")
     show.add_argument("--json", action="store_true")
@@ -300,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     plan = sub.add_parser(
         "plan",
         parents=[common],
-        help="decompose sources into changes from a JSON plan (file or -)",
+        help="decompose commits into changes from a JSON plan (file or -)",
     )
     plan.add_argument("file")
 
@@ -332,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     nts = sub.add_parser(
         "notes",
         parents=[common],
-        help="the human reviewer's notes as JSON, with the code each refers to",
+        help="the reviewer's notes as JSON, with the code each refers to",
     )
     nts.add_argument("--open", action="store_true", help="only unaddressed notes")
 
@@ -340,9 +346,9 @@ def main(argv: list[str] | None = None) -> int:
         "resolve", parents=[common], help="mark a reviewer note as addressed"
     )
     res.add_argument("note_id")
-    res.add_argument("--reply", help="what you did (or why not), shown to the human")
+    res.add_argument("--reply", help="what you did (or why not), shown to the reviewer")
 
-    rv = sub.add_parser("review", help="hand the changeset to the human and wait")
+    rv = sub.add_parser("review", help="hand the changeset to the reviewer and wait")
     rv_sub = rv.add_subparsers(dest="action", required=True)
     rq = rv_sub.add_parser(
         "request", parents=[common], help="tell the TUI you are awaiting review"
@@ -351,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
     wt = rv_sub.add_parser(
         "wait",
         parents=[common],
-        help="block until the human presses D, then print their open notes "
+        help="block until the reviewer presses D, then print their open notes "
         "(exit 3 on --timeout)",
     )
     wt.add_argument("--timeout", type=float, default=0, help="seconds; 0 = forever")

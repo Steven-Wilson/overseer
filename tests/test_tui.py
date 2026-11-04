@@ -351,7 +351,7 @@ async def test_white_changes_hidden_until_t_swaps_views(tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         assert [c.id for c in app._changes] == ["w1-02", "w1-01"]
-        assert "2 tests/text hidden" in app.query_one("#changes").border_title
+        assert "2 white hidden" in app.query_one("#changes").border_title
         await pilot.press("j")  # remember the second code change
         await pilot.press("t")
         await pilot.pause()

@@ -1,6 +1,6 @@
 """What changed since the reviewer last said "I've reviewed this".
 
-A snapshot records content hashes, not ids or positions: a re-plan renumbers
+A baseline records content hashes, not ids or positions: a re-plan renumbers
 changes, and unrelated edits shift line numbers, but neither should make
 already-reviewed code look new. A hunk's identity is its path plus its diff
 lines (the `@@` header is excluded because it carries line numbers).
@@ -25,7 +25,7 @@ def hunk_hash(hunk: Hunk) -> str:
 
 
 def meta_hash(change: Change) -> str:
-    """The reviewer-facing text that is not diff: title, risk and explanations."""
+    """The reviewer-facing text that is not diff: title, risk and answers."""
     data = [
         change.title,
         change.risk,
@@ -35,7 +35,7 @@ def meta_hash(change: Change) -> str:
     return hashlib.sha1(json.dumps(data).encode()).hexdigest()[:12]
 
 
-def take_snapshot(changes: list[Change], sources: dict[str, Source]) -> dict:
+def take_baseline(changes: list[Change], sources: dict[str, Source]) -> dict:
     hunks: set[str] = set()
     for c in changes:
         hunks.update(hunk_hash(h) for _, _, h in resolve_hunks(c, sources))
@@ -47,7 +47,7 @@ def take_snapshot(changes: list[Change], sources: dict[str, Source]) -> dict:
 
 
 def when(at: str) -> str:
-    """The snapshot time in the viewer's local zone, e.g. `Nov 04 04:50`."""
+    """The baseline time in the viewer's local zone, e.g. `Nov 04 04:50`."""
     try:
         return datetime.fromisoformat(at).astimezone().strftime("%b %d %H:%M")
     except ValueError:
@@ -69,21 +69,21 @@ class Freshness:
 
 
 def freshness(
-    change: Change, sources: dict[str, Source], snapshot: dict | None
+    change: Change, sources: dict[str, Source], baseline: dict | None
 ) -> Freshness:
-    """`new`: no hunk was in the snapshot. `changed`: some were not. `updated`:
-    the code is all familiar but the explanation, title or risk differs."""
-    if not snapshot:
+    """`new`: no hunk was in the baseline. `changed`: some were not. `updated`:
+    the code is all familiar but the answers, title or risk differs."""
+    if not baseline:
         return Freshness()
-    seen = set(snapshot.get("hunks", []))
+    seen = set(baseline.get("hunks", []))
     hunks = resolve_hunks(change, sources)
     fresh = [i + 1 for i, (_, _, h) in enumerate(hunks) if hunk_hash(h) not in seen]
-    out = Freshness(new_hunks=fresh, total=len(hunks), since=snapshot.get("at", ""))
+    out = Freshness(new_hunks=fresh, total=len(hunks), since=baseline.get("at", ""))
     if hunks and len(fresh) == len(hunks):
         out.kind = "new"
     elif fresh:
         out.kind = "changed"
-    elif snapshot.get("changes", {}).get(change.id, meta_hash(change)) != meta_hash(
+    elif baseline.get("changes", {}).get(change.id, meta_hash(change)) != meta_hash(
         change
     ):
         out.kind = "updated"

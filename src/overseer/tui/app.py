@@ -14,7 +14,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 from overseer.editor import build_command, is_gui, resolve_editor
-from overseer.freshness import Freshness, freshness, take_snapshot, when
+from overseer.freshness import Freshness, freshness, take_baseline, when
 from overseer.gitdiff import GitError, file_at, head_rev
 from overseer.model import (
     QUESTIONS,
@@ -75,7 +75,7 @@ def render_change(
     notes: list[Note] | None = None,
     fresh: Freshness | None = None,
 ) -> Text:
-    """Overview (explanation, commit message, hunk outline) first, then one hunk
+    """Overview (answers, commit message, hunk outline) first, then one hunk
     at a time. Built as `Text` (not markup) because diff content is full of brackets."""
     out = Text()
     out.append(f"{change.title}\n", style="bold underline")
@@ -91,7 +91,7 @@ def render_change(
             "new": "NEW since your last review",
             "changed": "CHANGED since your last review: "
             f"hunk {', '.join(map(str, fresh.new_hunks))} of {fresh.total} new",
-            "updated": "UPDATED since your last review: title, explanation or risk",
+            "updated": "UPDATED since your last review: title, answers or risk",
         }[fresh.kind]
         if overview or fresh.kind != "updated":
             baseline = when(fresh.since)
@@ -271,7 +271,7 @@ class OverseerApp(App):
         self._sources: dict[str, Source] = {}
         self._name = self.store.name  # changeset being shown
         self._other = 0  # changes in the view that is not showing
-        self._show_text = False  # False: code changes; True: white (tests/text) only
+        self._show_text = False  # False: code view; True: white view
         self._view_key = (self._name, False)
         self._remembered: dict[tuple[str, bool], str | None] = {}  # selection per view
         self._selected: str | None = None  # change id, stable across refreshes
@@ -281,8 +281,8 @@ class OverseerApp(App):
         self._pin_dir: str | None = None  # temp dir of read-only pinned copies
         self._rebuilding = False  # ignore highlight events while the list is rebuilt
         self._notes: list[Note] = []
-        self._snapshot: dict | None = None  # what the reviewer last marked reviewed
-        self._everything: list[Change] = []  # both views, for taking a snapshot
+        self._baseline: dict | None = None  # what the reviewer last marked reviewed
+        self._everything: list[Change] = []  # both views, for taking a baseline
         self._review: dict = {}
         self._note_target: tuple[str, str] | None = None  # (kind, ref) being typed
 
@@ -335,21 +335,21 @@ class OverseerApp(App):
         everything = by_priority(self.store.changes(sources))
         changes = [c for c in everything if (c.risk == "white") == self._show_text]
         other = self._other = len(everything) - len(changes)
-        snapshot = self.store.reviewed()
+        baseline = self.store.reviewed()
         self._everything = everything
         # A changed change must not hide in the other view, so count both.
         is_fresh = {
-            c.id: bool(freshness(c, sources, snapshot).kind) for c in everything
+            c.id: bool(freshness(c, sources, baseline).kind) for c in everything
         }
         here = sum(is_fresh[c.id] for c in changes)
         there = sum(is_fresh.values()) - here
         since = f"  ·  {here} changed since review" if here else ""
         elsewhere = f", {there} changed" if there else ""
         if self._show_text:
-            title = f"Tests / text{since}  ·  t: back to code ({other}{elsewhere})"
+            title = f"White changes{since}  ·  t: back to code ({other}{elsewhere})"
         else:
             away = f" ({there} changed)" if there else ""
-            hidden = f"  ·  t: {other} tests/text hidden{away}"
+            hidden = f"  ·  t: {other} white hidden{away}"
             title = f"Changes{since}" + (hidden if other else "")
         self.query_one("#changes").border_title = title
         notes = self.store.notes()
@@ -357,9 +357,9 @@ class OverseerApp(App):
             c.to_dict() for c in self._changes
         ]
         if same_changes and sources == self._sources and not switched:
-            if notes != self._notes or snapshot != self._snapshot:
+            if notes != self._notes or baseline != self._baseline:
                 # relabel in place: keep cursor and hunk
-                self._notes, self._snapshot = notes, snapshot
+                self._notes, self._baseline = notes, baseline
                 for item, change in zip(
                     self.query("#changes ListItem"), changes, strict=False
                 ):
@@ -367,7 +367,7 @@ class OverseerApp(App):
                 await self._show()
             return
         self._changes, self._sources, self._notes = changes, sources, notes
-        self._snapshot = snapshot
+        self._baseline = baseline
         view = self.query_one("#changes", ListView)
         # clear() yields to the event loop, which delivers a "nothing highlighted"
         # event; without this guard it would reset the selection to the top.
@@ -401,7 +401,7 @@ class OverseerApp(App):
         label.append(
             f"\n  {_plural(len(hunks), 'hunk')} · {_plural(files, 'file')}", style="dim"
         )
-        fresh = freshness(change, self._sources, self._snapshot)
+        fresh = freshness(change, self._sources, self._baseline)
         if fresh.kind:
             label.append(f" · {fresh.tag}", style="bold cyan")
         opened, addressed = note_count(change, self._notes)
@@ -440,10 +440,10 @@ class OverseerApp(App):
         detail = self.query_one("#detail", Static)
         if change:
             hunks = resolve_hunks(change, self._sources)
-            fresh = freshness(change, self._sources, self._snapshot)
+            fresh = freshness(change, self._sources, self._baseline)
             detail.update(render_change(change, hunks, self._hunk, self._notes, fresh))
         elif self._other:
-            where = "code" if self._show_text else "tests/text"
+            where = "code" if self._show_text else "white"
             detail.update(
                 Text(
                     f"No changes here. {_plural(self._other, 'change')} in the "
@@ -594,13 +594,13 @@ class OverseerApp(App):
         if self._review.get("state") != "requested":
             return
         self.store.set_review("done", self._review.get("message", ""))
-        self.store.save_reviewed(take_snapshot(self._everything, self._sources))
+        self.store.save_reviewed(take_baseline(self._everything, self._sources))
         self.notify("Marked review done; the agent can now read your notes")
         await self.action_refresh()
 
     async def action_mark_reviewed(self) -> None:
         """Take the "since last review" baseline now, without any agent waiting."""
-        self.store.save_reviewed(take_snapshot(self._everything, self._sources))
+        self.store.save_reviewed(take_baseline(self._everything, self._sources))
         self.notify("Marked everything reviewed; changes from now on will be flagged")
         await self.action_refresh()
 

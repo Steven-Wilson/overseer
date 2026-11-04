@@ -1,4 +1,4 @@
-from overseer.freshness import freshness, hunk_hash, take_snapshot
+from overseer.freshness import freshness, hunk_hash, take_baseline
 from overseer.model import Change, Hunk, Source
 from overseer.store import Store
 from overseer.tui.app import OverseerApp
@@ -28,7 +28,7 @@ def test_kinds_new_changed_updated_and_no_baseline():
     sources = {"s1": s1}
     c = Change("c1", "T", ["s1:1", "s1:2"], answers={"why": "w"}, risk="green")
     assert freshness(c, sources, None).kind == ""  # no baseline: flag nothing
-    snap = take_snapshot([c], sources)
+    snap = take_baseline([c], sources)
     assert freshness(c, sources, snap).kind == ""
 
     # the change gains a hunk from a new commit
@@ -48,7 +48,7 @@ def test_kinds_new_changed_updated_and_no_baseline():
 
 def test_regrouping_or_renumbering_does_not_look_new():
     sources = {"s1": src("s1", "a", "b")}
-    snap = take_snapshot([Change("old-01", "All", ["s1:1", "s1:2"])], sources)
+    snap = take_baseline([Change("old-01", "All", ["s1:1", "s1:2"])], sources)
     split = [Change("new-01", "A", ["s1:1"]), Change("new-02", "B", ["s1:2"])]
     assert [freshness(c, sources, snap).kind for c in split] == ["", ""]
 
@@ -116,7 +116,7 @@ async def test_done_key_takes_baseline_and_hidden_changes_are_counted(tmp_path):
         await app.action_refresh()
         await pilot.pause()
         title = app.query_one("#changes").border_title
-        assert "1 tests/text hidden (1 changed)" in title  # not lost behind t
+        assert "1 white hidden (1 changed)" in title  # not lost behind t
         await pilot.press("t")
         await pilot.pause()
         assert "UPDATED" in labels(app)[0]
@@ -132,5 +132,5 @@ def test_when_formats_the_baseline_and_tolerates_junk():
 def test_freshness_carries_the_baseline_time():
     sources = {"s1": src("s1", "a")}
     c = Change("c1", "T", ["s1:1"])
-    snap = take_snapshot([c], sources)
+    snap = take_baseline([c], sources)
     assert freshness(c, sources, snap).since == snap["at"]

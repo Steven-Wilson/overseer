@@ -1,4 +1,4 @@
-"""Decompose sources into reviewable `Change`s.
+"""Decompose commits into reviewable `Change`s.
 
 An agent reads hunks (`overseer-cli show`), decides how they group into small,
 single-purpose changes, and submits a plan. `apply_plan` is deliberately strict:
@@ -143,7 +143,7 @@ def apply_plan(store: Store, plan: object) -> list[Change]:
                 problems.append(f"changes[{n}]: {e}")
                 continue
             if sid not in sources:
-                problems.append(f"changes[{n}]: unknown source {sid!r} (ingest first)")
+                problems.append(f"changes[{n}]: unknown commit {sid!r} (ingest first)")
             elif idx >= len(sources[sid].hunks):
                 problems.append(
                     f"changes[{n}]: {hid} does not exist "
@@ -168,7 +168,7 @@ def apply_plan(store: Store, plan: object) -> list[Change]:
         if missing:
             problems.append(f"unassigned hunks in {sid}: {', '.join(missing)}")
 
-    # Replacing a change that also covers sources outside this plan would
+    # Replacing a change that also covers commits outside this plan would
     # orphan those hunks, so make the agent include them.
     stale = [
         c
@@ -180,7 +180,7 @@ def apply_plan(store: Store, plan: object) -> list[Change]:
         if outside:
             problems.append(
                 f"existing change {c.id} also covers {', '.join(sorted(outside))}; "
-                "include those sources' hunks in the plan too"
+                "include those commits' hunks in the plan too"
             )
     if problems:
         raise PlanError(problems)

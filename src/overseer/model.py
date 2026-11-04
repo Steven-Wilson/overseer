@@ -5,10 +5,10 @@ Two layers:
 * `Source` — raw material as it exists upstream (currently: one git commit,
   split into `Hunk`s). Immutable once ingested; hunks are addressed by id
   (`<source id>:<1-based index>`).
-* `Note` — the human reviewer's feedback, attached to a hunk, a change or a whole
+* `Note` — the reviewer's feedback, attached to a hunk, a change or a whole
   changeset, for an agent to read back and act on.
 * `Change` — a human-sized unit of review. It references hunks (possibly from
-  several sources) and carries the explanation. A large or multi-purpose commit
+  several sources) and carries the answers. A large or multi-purpose commit
   is decomposed into several `Change`s by an agent via `overseer-cli plan`.
 
 Nothing here may import textual.
@@ -30,7 +30,7 @@ QUESTIONS: dict[str, str] = {
 }
 
 
-# Risk of a change to the reviewer: how much human attention it needs.
+# Risk of a change to the reviewer: how much reviewer attention it needs.
 RISKS: dict[str, str] = {
     "green": "very little or no risk; behavior is verifiably correct",
     "yellow": (
@@ -151,7 +151,7 @@ NOTE_STATUSES = ("open", "addressed")
 
 @dataclass
 class Note:
-    """Reviewer feedback. Written by the human in the TUI; an agent reads it with
+    """Reviewer feedback. Written by the reviewer in the TUI; an agent reads it with
     `overseer-cli notes` and marks it addressed with `overseer-cli resolve`."""
 
     id: str  # n1, n2, ... within a changeset

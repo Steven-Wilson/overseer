@@ -21,15 +21,45 @@ This project aims to help every engineering change answer these questions:
 Some changes are easier than others to reason about, but in 2026 it's no longer
 viable to simply review git diffs and say "the code passed code review".
 
+## Vocabulary
+
+These terms mean the same thing in the README, the TUI, the CLI, and the agent
+skills. Use them as written.
+
+| Term | Meaning |
+| --- | --- |
+| **reviewer** | The person using the TUI. Skills never say "the human" or "the user". |
+| **agent** | The coding agent driving `overseer-cli`: it prepares changes and answers notes. |
+| **commit** | A git commit, as ingested. (`Source` in the code; the CLI, TUI and skills say "commit".) |
+| **hunk** | One contiguous piece of a commit's diff. Its id is `<7-char sha>:<n>`, e.g. `abc1234:2`. |
+| **change** | The unit the reviewer reviews: a titled group of hunks (possibly from several commits) with a purpose. Ids look like `abc1234-01`. |
+| **whole commit** | The default change made at ingest: one per commit, not yet decomposed. |
+| **decompose** | Replace a commit's whole-commit change with several focused changes. Changes are *decomposed* (`planned: true` in JSON) or *undecomposed*. |
+| **plan** | The JSON an agent submits (`overseer-cli plan`) to decompose. Every hunk of every commit it touches must be assigned exactly once. |
+| **review order** | The order the agent wrote its changes and hunks in, so they read as a story. The TUI keeps it within a risk tier. |
+| **review questions** | The eight questions at the top of this file. |
+| **answer** | The response to one review question, on a change. Only questions worth answering are answered. |
+| **hunk summary** | One sentence per hunk: what it does and why it sits there. |
+| **overview** | What the TUI shows first for a decomposed change: its answers and an outline of hunk summaries, before hunk 1. |
+| **related code** | A pointer (`path`, optional line and note) to code that helps judge a change or hunk: consumers, tests, precedent, dependencies. Recorded with `link` / `related` in the CLI. Enter opens it. |
+| **risk** | How much reviewer attention a change needs: **red** (guesswork, breaking, weakly tested, or sweeping), **yellow** (worth a look), **green** (verifiably correct), **white** (tests, docs or comments only). Everything but green has a *risk reason*; unrated shows as `○`. |
+| **code view / white view** | The two lists in the TUI. White changes are hidden from the code view (`t` swaps); the list border always counts them. |
+| **changeset** | An isolated set of commits and changes to review, e.g. `local` or `pr-123`. Every `overseer-cli` command except `changeset` names one with `--changeset`. The TUI shows one at a time (the *active* one). |
+| **note** | The reviewer's feedback on a hunk (`n`), a change (`N`) or a changeset (`m`). *Open* until the agent *resolves* it with a reply, then *addressed*. A note whose target vanished after a re-ingest or re-plan is *stale*. |
+| **review request** | The agent pauses for the reviewer: `review request`, then `review wait` until the reviewer presses `D` (*done reviewing*). |
+| **baseline** | What the reviewer had seen at their last `D` or `R` (*mark reviewed*). Matched by hunk content, not ids. |
+| **NEW / CHANGED +N / UPDATED** | Freshness against the baseline: NEW = no hunk seen before; CHANGED +N = N hunks not seen; UPDATED = same code, different title, answers or risk. |
+| **store** | The `.overseer/` directory both programs share. |
+
 ## How it works
 
 Overseer has two halves that share a small on-disk store (`.overseer/`):
 
 - **`overseer-cli`**: the headless interface your coding agent uses. It ingests
-  git commits, and the agent (guided by a skill) splits them into small,
-  single-purpose *changes*, each with answers to the questions above, a risk
-  rating, and links to related code.
-- **`overseer`**: a terminal UI where you review those changes, leave notes
+  git commits, and the agent (guided by a skill) decomposes them into small,
+  single-purpose *changes*, each with answers to the review questions, a risk
+  rating, and related code.
+- **`overseer`**: a terminal UI where you, the reviewer, review those changes, leave notes
   for the agent, and mark what you've reviewed.
 
 ## Install
@@ -52,7 +82,7 @@ mkdir -p .claude/skills
 cp -r ~/overseer/.claude/skills/overseer-* .claude/skills/
 ```
 
-- `overseer-decompose`: break commits into reviewable changes.
+- `overseer-decompose`: decompose commits into reviewable changes.
 - `overseer-feedback`: read your TUI notes, or pause for your review.
 
 ## Use it in a project
@@ -94,20 +124,20 @@ point at the same store.
 | `h` / `l` | focus changes / related-code pane |
 | `[` / `]` | previous / next hunk (a planned change opens on an overview) |
 | `ctrl+d` / `ctrl+u` | scroll the diff |
-| `Enter` | open the highlighted related-code link in `$EDITOR` |
-| `O` | open the working-tree file for a link recorded at another commit |
-| `t` | toggle the code view and the hidden white (tests/docs) view |
+| `Enter` | open the highlighted related code in `$EDITOR` |
+| `O` | open the working-tree file for related code recorded at another commit |
+| `t` | swap the code view and the white view |
 | `c` | switch changeset (`d` then `y` deletes the highlighted one) |
 | `n` / `N` / `m` | note on the hunk / change / changeset (Enter saves, Esc cancels) |
 | `R` | mark everything reviewed |
 | `D` | finish a review the agent requested |
 
-Risk is shown per change: red, yellow, green, or white (tests/docs/comments
-only, hidden until you press `t`; the list border always shows how many).
-Changes new or modified since your last `R`/`D` are flagged `NEW`,
-`CHANGED +N` or `UPDATED`.
+Risk is shown per change (see Vocabulary). White changes are hidden until you
+press `t`; the list border always shows how many. Changes new or modified
+since your baseline (your last `R`/`D`) are flagged `NEW`, `CHANGED +N` or
+`UPDATED`.
 
-Set `$EDITOR` (or `$VISUAL`) for link opening; terminal editors suspend the
+Set `$EDITOR` (or `$VISUAL`) for opening related code; terminal editors suspend the
 TUI, GUI editors are launched detached.
 
 ## Development

@@ -5,7 +5,7 @@
     changesets/<name>/changes/<id>.json     reviewable units referencing hunks
     changesets/<name>/notes/<id>.json       the human reviewer's notes
     changesets/<name>/review.json           review handshake (idle/requested/done)
-    changesets/<name>/reviewed.json         snapshot of what the reviewer last saw
+    changesets/<name>/reviewed.json         baseline: what the reviewer last saw
 
 A changeset is an independent body of review material (e.g. "my local commits"
 vs "teammate's PR 123"). Everything else operates on one changeset at a time:
@@ -195,7 +195,7 @@ class Store:
             self._dir(self.name), "review", {"state": state, "message": message}
         )
 
-    # -- reviewed snapshot ---------------------------------------------
+    # -- reviewed baseline ---------------------------------------------
 
     def reviewed(self) -> dict | None:
         """Baseline for "changed since last review"; None if never reviewed."""
@@ -204,8 +204,8 @@ class Store:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def save_reviewed(self, snapshot: dict) -> None:
-        self._write(self._dir(self.name), "reviewed", snapshot)
+    def save_reviewed(self, baseline: dict) -> None:
+        self._write(self._dir(self.name), "reviewed", baseline)
 
     # -- changes -------------------------------------------------------
 
