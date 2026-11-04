@@ -35,7 +35,7 @@ Use when you wrote code the human wants to look at before you continue.
 3. Tell the human in chat that you are waiting, then block: `overseer-cli review wait --changeset local`. It exits when they press `D`, printing their open notes. The tool timeout may kill a long foreground wait, so run it in the background, or loop short waits (`--timeout 100`; exit code 3 means "not done yet", call it again). Do not busy-poll `notes`.
    If the user says in chat that they are done, skip waiting and run `notes --open`.
 4. For each note: make the change, answer the question, or decide to decline. Then close it: `overseer-cli resolve <id> --changeset local --reply "<what you did, or why not>"`. The reply appears under the note in the TUI. An empty notes list means they had no feedback: continue.
-5. If you changed code, re-ingest and decompose the new commits into the same changeset, and repeat from step 2 only if the changes are substantial.
+5. If you changed code, re-ingest and decompose the new commits into the same changeset, and repeat from step 2 only if the changes are substantial. When the human pressed `D` (or `R`), the TUI took a snapshot, so everything you add or alter afterwards is flagged `NEW` / `CHANGED +N` / `UPDATED` for them. Matching is by hunk content, so keep unchanged hunks in unchanged changes where you can, and do not re-title, re-rate or rewrite explanations that did not need it: that shows up as `UPDATED` noise.
 
 ## B. Responding to a teammate's PR
 

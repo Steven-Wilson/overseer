@@ -384,3 +384,15 @@ def test_white_sorts_last_and_needs_a_reason(tmp_path, monkeypatch, capsys):
     assert cli.main(argv) == 1
     assert "white needs --risk-reason" in capsys.readouterr().err
     assert cli.main([*argv, "--risk-reason", "tests only"]) == 0
+
+
+def test_plural_uses_the_lookup_table():
+    import pytest
+
+    from overseer.tui.app import PLURALS, _plural
+
+    assert [_plural(n, "file") for n in (0, 1, 2)] == ["0 files", "1 file", "2 files"]
+    assert _plural(1, "hunk") == "1 hunk" and _plural(3, "change") == "3 changes"
+    assert set(PLURALS) >= {"hunk", "file", "change"}
+    with pytest.raises(KeyError):  # unknown words must be added, not guessed
+        _plural(2, "mouse")

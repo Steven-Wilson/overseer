@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 from overseer.editor import build_command, is_gui, resolve_editor
+from overseer.freshness import Freshness, freshness, take_snapshot
 from overseer.model import (
     QUESTIONS,
     RISKS,
@@ -33,8 +34,14 @@ def risk_badge(change: Change) -> Text:
     return Text(f"● {change.risk.upper()}", style=f"bold {change.risk}")
 
 
+# Explicit, because appending "s" is wrong for English in general. A word missing
+# from here raises KeyError, so adding a new counted noun forces the decision.
+PLURALS = {"hunk": "hunks", "file": "files", "change": "changes"}
+
+
 def _plural(n: int, word: str) -> str:
-    return f"{n} {word}{'' if n == 1 else 's'}"
+    """`1 file`, `2 files`."""
+    return f"{n} {word if n == 1 else PLURALS[word]}"
 
 
 def append_note(out: Text, note: Note, where: str) -> None:
@@ -63,6 +70,7 @@ def render_change(
     hunks: list[tuple[Source, int, Hunk]],
     hunk_index: int,
     notes: list[Note] | None = None,
+    fresh: Freshness | None = None,
 ) -> Text:
     """Explanation first, then the commit the current hunk came from, then the
     hunk. Built as `Text` (not markup) because diff content is full of brackets."""
@@ -72,6 +80,14 @@ def render_change(
     if change.risk_reason:
         out.append(f"  {change.risk_reason}")
     out.append("\n")
+    if fresh and fresh.kind:
+        what = {
+            "new": "NEW since your last review",
+            "changed": "CHANGED since your last review: "
+            f"hunk {', '.join(map(str, fresh.new_hunks))} of {fresh.total} new",
+            "updated": "UPDATED since your last review: title, explanation or risk",
+        }[fresh.kind]
+        out.append(f"{what}\n", style="bold cyan")
     if not change.planned:
         out.append(
             f"Not yet decomposed: whole commit, {len(hunks)} hunks. "
@@ -103,10 +119,12 @@ def render_change(
         out.append(f"Commit {source.id}\n", style="dim")
         out.append(f"{source.message}\n\n", style="dim")
         out.append(
-            f"Hunk {hunk_index + 1}/{len(hunks)} "
-            f"({source.hunk_id(idx)})  {hunk.path}\n",
+            f"Hunk {hunk_index + 1}/{len(hunks)} ({source.hunk_id(idx)})  {hunk.path}",
             style="bold cyan",
         )
+        if fresh and hunk_index + 1 in fresh.new_hunks:
+            out.append("  NEW", style="bold black on cyan")
+        out.append("\n")
         out.append(f"{hunk.header}\n", style="magenta")
         for line in hunk.lines:
             style = {"+": "green", "-": "red"}.get(line[:1], "")
@@ -164,7 +182,7 @@ class ChangesetItem(ListItem):
         label = Text()
         label.append("● " if active else "  ", style="bold green")
         label.append(name, style="bold" if active else "")
-        label.append(f"  {count} change{'' if count == 1 else 's'}", style="dim")
+        label.append(f"  {_plural(count, 'change')}", style="dim")
         super().__init__(Static(label))
         self.changeset = name
 
@@ -195,6 +213,7 @@ class OverseerApp(App):
         Binding("N", "note('change')", "Note on change"),
         Binding("m", "note('changeset')", "Note on changeset"),
         Binding("D", "done_reviewing", "Done reviewing"),
+        Binding("R", "mark_reviewed", "Mark reviewed"),
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("h", "pane('left')", "Changes"),
         Binding("l", "pane('right')", "Related code"),
@@ -219,6 +238,8 @@ class OverseerApp(App):
         self._shown_rows: list | None = None  # what the links list was built from
         self._rebuilding = False  # ignore highlight events while the list is rebuilt
         self._notes: list[Note] = []
+        self._snapshot: dict | None = None  # what the reviewer last marked reviewed
+        self._everything: list[Change] = []  # both views, for taking a snapshot
         self._review: dict = {}
         self._note_target: tuple[str, str] | None = None  # (kind, ref) being typed
 
@@ -270,18 +291,31 @@ class OverseerApp(App):
         everything = by_priority(self.store.changes(sources))
         changes = [c for c in everything if (c.risk == "white") == self._show_text]
         other = self._other = len(everything) - len(changes)
-        self.query_one("#changes").border_title = (
-            f"Tests / text  ·  t: back to code ({other})"
-            if self._show_text
-            else "Changes" + (f"  ·  t: {other} tests/text hidden" if other else "")
-        )
+        snapshot = self.store.reviewed()
+        self._everything = everything
+        # A changed change must not hide in the other view, so count both.
+        is_fresh = {
+            c.id: bool(freshness(c, sources, snapshot).kind) for c in everything
+        }
+        here = sum(is_fresh[c.id] for c in changes)
+        there = sum(is_fresh.values()) - here
+        since = f"  ·  {here} changed since review" if here else ""
+        elsewhere = f", {there} changed" if there else ""
+        if self._show_text:
+            title = f"Tests / text{since}  ·  t: back to code ({other}{elsewhere})"
+        else:
+            away = f" ({there} changed)" if there else ""
+            hidden = f"  ·  t: {other} tests/text hidden{away}"
+            title = f"Changes{since}" + (hidden if other else "")
+        self.query_one("#changes").border_title = title
         notes = self.store.notes()
         same_changes = [c.to_dict() for c in changes] == [
             c.to_dict() for c in self._changes
         ]
         if same_changes and sources == self._sources and not switched:
-            if notes != self._notes:  # relabel in place: keep cursor and hunk
-                self._notes = notes
+            if notes != self._notes or snapshot != self._snapshot:
+                # relabel in place: keep cursor and hunk
+                self._notes, self._snapshot = notes, snapshot
                 for item, change in zip(
                     self.query("#changes ListItem"), changes, strict=False
                 ):
@@ -289,6 +323,7 @@ class OverseerApp(App):
                 await self._show()
             return
         self._changes, self._sources, self._notes = changes, sources, notes
+        self._snapshot = snapshot
         view = self.query_one("#changes", ListView)
         # clear() yields to the event loop, which delivers a "nothing highlighted"
         # event; without this guard it would reset the selection to the top.
@@ -322,6 +357,9 @@ class OverseerApp(App):
         label.append(
             f"\n  {_plural(len(hunks), 'hunk')} · {_plural(files, 'file')}", style="dim"
         )
+        fresh = freshness(change, self._sources, self._snapshot)
+        if fresh.kind:
+            label.append(f" · {fresh.tag}", style="bold cyan")
         opened, addressed = note_count(change, self._notes)
         if opened:
             label.append(f" · ✎{opened}", style="bold yellow")
@@ -358,12 +396,14 @@ class OverseerApp(App):
         detail = self.query_one("#detail", Static)
         if change:
             hunks = resolve_hunks(change, self._sources)
-            detail.update(render_change(change, hunks, self._hunk, self._notes))
+            fresh = freshness(change, self._sources, self._snapshot)
+            detail.update(render_change(change, hunks, self._hunk, self._notes, fresh))
         elif self._other:
             where = "code" if self._show_text else "tests/text"
             detail.update(
                 Text(
-                    f"No changes here. {self._other} {where} change(s): press t.",
+                    f"No changes here. {_plural(self._other, 'change')} in the "
+                    f"{where} view: press t.",
                     style="dim",
                 )
             )
@@ -508,7 +548,14 @@ class OverseerApp(App):
         if self._review.get("state") != "requested":
             return
         self.store.set_review("done", self._review.get("message", ""))
+        self.store.save_reviewed(take_snapshot(self._everything, self._sources))
         self.notify("Marked review done; the agent can now read your notes")
+        await self.action_refresh()
+
+    async def action_mark_reviewed(self) -> None:
+        """Take the "since last review" baseline now, without any agent waiting."""
+        self.store.save_reviewed(take_snapshot(self._everything, self._sources))
+        self.notify("Marked everything reviewed; changes from now on will be flagged")
         await self.action_refresh()
 
     def action_delete_changeset(self) -> None:
