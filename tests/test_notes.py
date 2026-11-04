@@ -104,7 +104,7 @@ async def test_tui_adds_notes_at_each_level(tmp_path):
     app = OverseerApp(store)
     async with app.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("right_square_bracket")  # hunk 2
+        await pilot.press("right_square_bracket", "right_square_bracket")  # hunk 2
         await pilot.press("n")
         await pilot.press(*"why [new] file?", "enter")
         await pilot.press("N")
@@ -121,14 +121,15 @@ async def test_tui_adds_notes_at_each_level(tmp_path):
             ("changeset", "", "overall"),
         ]
         t = str(app.query_one("#detail").render())
-        assert "why [new] file?" in t and "split" in t and "overall" in t
-        assert "Hunk 2/2" in t  # adding a note didn't reset the hunk
+        assert "why [new] file?" in t and "Hunk 2/2" in t  # note kept the hunk
         label = str(app.query("#changes Static").first().render())
         assert "✎2" in label
-        await pilot.press("right_square_bracket")  # keys work again afterwards
-        await pilot.press("left_square_bracket")
+        await pilot.press("left_square_bracket")  # keys work again afterwards
         assert "Hunk 1/2" in str(app.query_one("#detail").render())
         assert "why [new] file?" not in str(app.query_one("#detail").render())
+        await pilot.press("left_square_bracket")  # overview carries the top notes
+        t = str(app.query_one("#detail").render())
+        assert "split" in t and "overall" in t and "Hunk 1/2" not in t
 
 
 async def test_tui_shows_agent_reply_and_done_key(tmp_path):

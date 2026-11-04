@@ -15,6 +15,7 @@ Plan format:
                   "related": [{"path": "src/x.py", "line": 12, "note": "caller"}],
                   "hunk_related": {"abc1234:1": [{"path": "tests/t.py", "line": 3}]}}]}
 
+`hunk_summaries` (optional, keyed by hunk id) is one sentence per hunk.
 `related` and `hunk_related` are optional; `hunk_related` keys must be hunks of
 the same change.
 """
@@ -102,6 +103,17 @@ def _validate_shape(plan: object) -> list[str]:
                         f"{where}.hunk_related: {hid} is not one of this change's hunks"
                     )
                 _parse_links(links, f"{where}.hunk_related[{hid}]", problems)
+        summaries = c.get("hunk_summaries", {})
+        if not isinstance(summaries, dict):
+            problems.append(f"{where}.hunk_summaries: must be an object by hunk id")
+        else:
+            for hid, text in summaries.items():
+                if isinstance(hunks, list) and hid not in hunks:
+                    problems.append(
+                        f"{where}.hunk_summaries: {hid} is not a hunk of this change"
+                    )
+                if not isinstance(text, str) or not text.strip():
+                    problems.append(f"{where}.hunk_summaries[{hid}]: needs text")
         answers = c.get("answers", {})
         if not isinstance(answers, dict):
             problems.append(f"{where}: answers must be an object")
@@ -190,6 +202,9 @@ def apply_plan(store: Store, plan: object) -> list[Change]:
                 hunk_links={
                     h: _parse_links(xs, "", ignored)
                     for h, xs in c.get("hunk_related", {}).items()
+                },
+                hunk_summaries={
+                    h: t.strip() for h, t in c.get("hunk_summaries", {}).items()
                 },
             )
         )

@@ -33,6 +33,7 @@ For a PR, fetch it so the range resolves (e.g. `gh pr checkout` or `git fetch or
    - `white` and `green`: almost nothing, often a single short `mechanical` or `why`, or no answers at all.
    - `yellow`: only the answers that explain *why it is not green* or that the reviewer needs to judge it (typically `semantic`, `coverage`, `impact`; two to four answers).
    - `red`: the fullest, still short; cover what makes it red and what to check.
+   **Summarise each hunk** (`hunk_summaries`, keyed by hunk id): the TUI opens a change on its description plus an outline of its hunks, then `]` steps through them, showing only that hunk's summary above the diff (the change-wide answers are *not* repeated). So write each summary as one sentence saying what this hunk does and, when the order isn't obvious, why it comes here ("defines the field the next hunks fill in", "caller updated for the new signature"). Give every hunk of a multi-hunk change one; do not restate the title. Order: definitions, then implementation, then callers, then tests, unless the story reads better otherwise. Add or fix one later with `overseer-cli record <change-id> --hunk <hunk-id> --summary "..."`.
 6. **Link related code** so the reviewer can jump straight to what matters. Links are shown in the TUI and opened in `$EDITOR` on Enter. Per change (`related`) or, when it concerns one hunk specifically, per hunk (`hunk_related`, keyed by hunk id, which must belong to that change). Look for:
    - **consumers**: callers/importers of any function, type or format whose behavior or signature changed (grep or LSP; do not guess);
    - **tests** that cover (or should cover) the change;
@@ -56,6 +57,7 @@ For a PR, fetch it so the range resolves (e.g. `gh pr checkout` or `git fetch or
       "risk": "yellow",
       "risk_reason": "parser is covered, but no test hits a rename-only diff",
       "answers": {"semantic": "...", "why": "..."},
+      "hunk_summaries": {"abc1234:1": "Moves the parser out of cli.py", "abc1234:2": "cli.py now calls it"},
       "related": [{"path": "src/overseer/cli.py", "line": 40, "note": "only caller"}],
       "hunk_related": {"abc1234:2": [{"path": "tests/test_x.py", "line": 12}]}}
    ]}

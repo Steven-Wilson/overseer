@@ -117,6 +117,12 @@ def _record(store: Store, args: argparse.Namespace) -> int:
         return _err(f"{change.risk} needs --risk-reason")
     if args.question:
         change.answers[args.question] = args.text
+    if bool(args.hunk) != (args.summary is not None):
+        return _err("--hunk and --summary must be given together")
+    if args.hunk:
+        if args.hunk not in change.hunk_ids:
+            return _err(f"{args.hunk} is not a hunk of {change.id}")
+        change.hunk_summaries[args.hunk] = args.summary.strip()
     store.save_change(change)
     return 0
 
@@ -305,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--risk-reason")
     rec.add_argument("--question", choices=sorted(QUESTIONS))
     rec.add_argument("--text", help="answer text for --question")
+    rec.add_argument("--hunk", help="hunk id; use with --summary")
+    rec.add_argument("--summary", help="one-sentence summary of --hunk")
 
     lnk = sub.add_parser(
         "link",

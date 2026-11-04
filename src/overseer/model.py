@@ -127,6 +127,9 @@ class Change:
     risk_reason: str = ""  # required for yellow/red
     links: list[Link] = field(default_factory=list)  # related to the whole change
     hunk_links: dict[str, list[Link]] = field(default_factory=dict)  # by hunk id
+    # One sentence per hunk id: what this hunk does and why it sits here in the
+    # order. Shown instead of the change-wide answers while stepping hunks.
+    hunk_summaries: dict[str, str] = field(default_factory=dict)
     position: int = 0  # index within its plan
 
     def to_dict(self) -> dict:

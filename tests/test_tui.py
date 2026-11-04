@@ -42,7 +42,11 @@ async def test_app_lists_changes_and_shows_context(tmp_path):
         assert len(app.query("#changes ListItem")) == 2
         t = text(app)
         assert "Part one" in t and "because" in t
-        assert "body [bracketed]" in t and "b.py" in t and "Hunk 1/1" in t
+        assert "body [bracketed]" in t and "Hunk 1/1" not in t  # commit message here
+        await pilot.press("right_square_bracket")
+        t = text(app)
+        assert "body [bracketed]" not in t  # not repeated per hunk
+        assert "+n2" in t and "b.py" in t and "Hunk 1/1" in t
 
 
 async def test_hunk_navigation_clamps(tmp_path):
@@ -53,6 +57,10 @@ async def test_hunk_navigation_clamps(tmp_path):
         await pilot.pause()
         await pilot.press("j")  # Part two: two hunks
         await pilot.pause()
+        assert "Hunk 1/2" not in text(app)  # starts on the overview
+        await pilot.press("left_square_bracket")  # clamps at the overview
+        assert "Hunks, in review order" in text(app)
+        await pilot.press("right_square_bracket")
         assert "Hunk 1/2" in text(app) and "+new [x]" in text(app)
         await pilot.press("right_square_bracket")
         assert "Hunk 2/2" in text(app) and "b.py" in text(app)
@@ -60,6 +68,8 @@ async def test_hunk_navigation_clamps(tmp_path):
         assert "Hunk 2/2" in text(app)
         await pilot.press("left_square_bracket")
         assert "Hunk 1/2" in text(app)
+        await pilot.press("left_square_bracket")
+        assert "Hunks, in review order" in text(app)
 
 
 async def test_unplanned_change_is_flagged(tmp_path):
@@ -119,6 +129,9 @@ async def test_vim_pane_switching_and_links_follow_hunk(tmp_path):
         assert app.focused.id == "changes"
         await pilot.press("j")  # Part two
         await pilot.pause()
+        assert link_labels(app)[0] == "This change"  # overview: no hunk yet
+        await pilot.press("right_square_bracket")
+        await pilot.pause()
         labels = link_labels(app)
         assert labels[0].startswith("This hunk") and "a.py:3" in labels[1]
         assert labels[-2:] == ["This change", "README.md  docs"]
@@ -148,7 +161,9 @@ async def test_enter_opens_editor_at_line(tmp_path, monkeypatch):
     app.run_editor = lambda cmd, gui: ran.append((cmd, gui))
     async with app.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("j", "right_square_bracket", "l", "enter")
+        await pilot.press(
+            "j", "right_square_bracket", "right_square_bracket", "l", "enter"
+        )
         assert ran == [(["vim", "+9", "b.py"], False)]
 
 
@@ -396,3 +411,22 @@ def test_plural_uses_the_lookup_table():
     assert set(PLURALS) >= {"hunk", "file", "change"}
     with pytest.raises(KeyError):  # unknown words must be added, not guessed
         _plural(2, "mouse")
+
+
+async def test_hunk_summaries_listed_in_overview_and_shown_per_hunk(tmp_path):
+    store = Store(tmp_path)
+    seed(store)
+    c = store.load_change("s1-02")
+    c.hunk_summaries = {"s1:1": "defines the thing", "s1:2": "uses the thing"}
+    c.answers = {"why": "GLOBAL-WHY"}
+    store.save_change(c)
+    app = OverseerApp(store)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("j")
+        t = text(app)
+        assert "GLOBAL-WHY" in t and "defines the thing" in t and "uses the thing" in t
+        await pilot.press("right_square_bracket")
+        t = text(app)
+        assert "defines the thing" in t and "uses the thing" not in t
+        assert "GLOBAL-WHY" not in t  # the change-wide text is not repeated per hunk

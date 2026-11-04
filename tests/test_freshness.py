@@ -84,7 +84,7 @@ async def test_tui_flags_changes_after_mark_reviewed(tmp_path):
         assert "2 changed since review" in app.query_one("#changes").border_title
 
         await pilot.press("j")  # c2, then step to its new hunk
-        await pilot.press("right_square_bracket")
+        await pilot.press("right_square_bracket", "right_square_bracket")
         await pilot.pause()
         t = str(app.query_one("#detail").render())
         assert "CHANGED since your last review: hunk 2 of 2 new" in t

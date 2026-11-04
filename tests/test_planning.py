@@ -273,3 +273,20 @@ def test_invalid_links_rejected(store, extra, message):
     change = {"title": "t", "hunks": ["aaa:2", "aaa:3"], "risk": "green", **extra}
     with pytest.raises(PlanError, match=message):
         apply_plan(store, {"changes": [change]})
+
+
+def test_hunk_summaries_stored_validated_and_recordable(store, monkeypatch, tmp_path):
+    base = {"risk": "green", "title": "t", "hunks": ["aaa:1", "aaa:2", "aaa:3"]}
+    (change,) = apply_plan(
+        store, {"changes": [{**base, "hunk_summaries": {"aaa:2": " does x "}}]}
+    )
+    assert store.load_change(change.id).hunk_summaries == {"aaa:2": "does x"}
+    for bad in ({"bbb:1": "x"}, {"aaa:1": " "}, ["x"]):
+        with pytest.raises(PlanError):
+            apply_plan(store, {"changes": [{**base, "hunk_summaries": bad}]})
+    monkeypatch.setenv("OVERSEER_DIR", str(tmp_path))
+    args = ["record", change.id, "--changeset", "default"]
+    assert cli.main([*args, "--hunk", "aaa:3", "--summary", "adds y"]) == 0
+    assert store.load_change(change.id).hunk_summaries["aaa:3"] == "adds y"
+    assert cli.main([*args, "--hunk", "bbb:1", "--summary", "z"]) != 0
+    assert cli.main([*args, "--hunk", "aaa:1"]) != 0

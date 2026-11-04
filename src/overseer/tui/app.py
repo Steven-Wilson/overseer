@@ -75,14 +75,17 @@ def render_change(
     notes: list[Note] | None = None,
     fresh: Freshness | None = None,
 ) -> Text:
-    """Explanation first, then the commit the current hunk came from, then the
-    hunk. Built as `Text` (not markup) because diff content is full of brackets."""
+    """Overview (explanation, commit message, hunk outline) first, then one hunk
+    at a time. Built as `Text` (not markup) because diff content is full of brackets."""
     out = Text()
     out.append(f"{change.title}\n", style="bold underline")
     out.append_text(risk_badge(change))
     if change.risk_reason:
         out.append(f"  {change.risk_reason}")
     out.append("\n")
+    if not change.planned:
+        hunk_index = max(0, hunk_index)  # nothing to explain first
+    overview = hunk_index < 0 and bool(hunks)
     if fresh and fresh.kind:
         what = {
             "new": "NEW since your last review",
@@ -90,9 +93,10 @@ def render_change(
             f"hunk {', '.join(map(str, fresh.new_hunks))} of {fresh.total} new",
             "updated": "UPDATED since your last review: title, explanation or risk",
         }[fresh.kind]
-        baseline = when(fresh.since)
-        out.append(what, style="bold cyan")
-        out.append(f"  (baseline {baseline})\n" if baseline else "\n", style="dim")
+        if overview or fresh.kind != "updated":
+            baseline = when(fresh.since)
+            out.append(what, style="bold cyan")
+            out.append(f"  (baseline {baseline})\n" if baseline else "\n", style="dim")
     if not change.planned:
         out.append(
             f"Not yet decomposed: whole commit, {len(hunks)} hunks. "
@@ -101,40 +105,63 @@ def render_change(
         )
     out.append("\n")
 
-    for key, answer in change.answers.items():
-        if key in QUESTIONS:
-            out.append(f"{QUESTIONS[key]}\n", style="bold")
-            out.append(f"{answer}\n\n")
-
     notes = notes or []
-    top = [
-        (n, "change" if n.kind == "change" else "changeset")
-        for n in notes
-        if (n.kind == "change" and n.ref == change.id) or n.kind == "changeset"
-    ]
-    if top:
-        out.append("Your notes\n", style="bold")
-        for n, where in top:
-            append_note(out, n, where)
-        out.append("\n")
+    if overview:
+        for key, answer in change.answers.items():
+            if key in QUESTIONS:
+                out.append(f"{QUESTIONS[key]}\n", style="bold")
+                out.append(f"{answer}\n\n")
+        top = [
+            (n, "change" if n.kind == "change" else "changeset")
+            for n in notes
+            if (n.kind == "change" and n.ref == change.id) or n.kind == "changeset"
+        ]
+        if top:
+            out.append("Your notes\n", style="bold")
+            for n, where in top:
+                append_note(out, n, where)
+            out.append("\n")
+        seen: set[str] = set()
+        for source, _, _ in hunks:  # the commit(s) this change is cut from
+            if source.id not in seen:
+                seen.add(source.id)
+                out.append(f"Commit {source.id}\n", style="dim")
+                out.append(f"{source.message}\n\n", style="dim")
+        out.append("Hunks, in review order  (] starts)\n", style="bold")
+        for i, (source, idx, hunk) in enumerate(hunks):
+            hid = source.hunk_id(idx)
+            out.append(f"{i + 1}. ", style="bold cyan")
+            out.append(hunk.path, style="cyan")
+            if fresh and i + 1 in fresh.new_hunks:
+                out.append("  NEW", style="bold black on cyan")
+            summary = change.hunk_summaries.get(hid)
+            out.append(f"\n   {summary}\n" if summary else "\n", style="")
+        return out
 
     if hunks:
         hunk_index = max(0, min(hunk_index, len(hunks) - 1))
         source, idx, hunk = hunks[hunk_index]
-        out.append(f"Commit {source.id}\n", style="dim")
-        out.append(f"{source.message}\n\n", style="dim")
+        hid = source.hunk_id(idx)
+        if not change.planned:  # no overview to carry the commit message
+            out.append(f"Commit {source.id}\n", style="dim")
+            out.append(f"{source.message}\n\n", style="dim")
+        if not change.planned:  # no overview to carry the commit message
+            out.append(f"Commit {source.id}\n", style="dim")
+            out.append(f"{source.message}\n\n", style="dim")
         out.append(
-            f"Hunk {hunk_index + 1}/{len(hunks)} ({source.hunk_id(idx)})  {hunk.path}",
+            f"Hunk {hunk_index + 1}/{len(hunks)} ({hid})  {hunk.path}",
             style="bold cyan",
         )
         if fresh and hunk_index + 1 in fresh.new_hunks:
             out.append("  NEW", style="bold black on cyan")
         out.append("\n")
+        if change.hunk_summaries.get(hid):
+            out.append(f"{change.hunk_summaries[hid]}\n", style="bold")
         out.append(f"{hunk.header}\n", style="magenta")
         for line in hunk.lines:
             style = {"+": "green", "-": "red"}.get(line[:1], "")
             out.append(f"{line}\n", style=style)
-        here = [n for n in notes if n.kind == "hunk" and n.ref == source.hunk_id(idx)]
+        here = [n for n in notes if n.kind == "hunk" and n.ref == hid]
         if here:
             out.append("\nYour notes on this hunk\n", style="bold")
             for n in here:
@@ -248,7 +275,7 @@ class OverseerApp(App):
         self._view_key = (self._name, False)
         self._remembered: dict[tuple[str, bool], str | None] = {}  # selection per view
         self._selected: str | None = None  # change id, stable across refreshes
-        self._hunk = 0
+        self._hunk = -1  # -1 = the change overview, before any hunk
         self._shown_rows: tuple | None = None  # what the links list was built from
         self._head = ""  # our checkout's HEAD, to tell whether links match it
         self._pin_dir: str | None = None  # temp dir of read-only pinned copies
@@ -291,7 +318,7 @@ class OverseerApp(App):
             self._view_key = view_key
             self._name = self.store.name
             self._selected = self._remembered.get(view_key)
-            self._hunk = 0
+            self._hunk = -1  # -1 = the change overview, before any hunk
             self._shown_rows = None
         self._head = head_rev()  # a checkout can change under us, like the store
         review = self.store.review()
@@ -397,7 +424,7 @@ class OverseerApp(App):
             return []
         rows: list[tuple[str, str | Link]] = []
         hunks = resolve_hunks(change, self._sources)
-        if hunks:
+        if hunks and (self._hunk >= 0 or not change.planned):
             source, idx, hunk = hunks[max(0, min(self._hunk, len(hunks) - 1))]
             for_hunk = change.hunk_links.get(source.hunk_id(idx), [])
             if for_hunk:
@@ -464,7 +491,7 @@ class OverseerApp(App):
         )
         if selected != self._selected:
             self._selected = selected
-            self._hunk = 0
+            self._hunk = -1  # -1 = the change overview, before any hunk
         await self._show()
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
@@ -519,7 +546,7 @@ class OverseerApp(App):
         ref = ""
         if kind == "hunk" and change:
             hunks = resolve_hunks(change, self._sources)
-            if hunks:
+            if hunks and (self._hunk >= 0 or not change.planned):
                 source, idx, _ = hunks[max(0, min(self._hunk, len(hunks) - 1))]
                 ref = source.hunk_id(idx)
             else:
@@ -618,7 +645,8 @@ class OverseerApp(App):
         change = self._current()
         if change and change.hunk_ids:
             last = len(resolve_hunks(change, self._sources)) - 1
-            self._hunk = max(0, min(self._hunk + delta, last))
+            floor = -1 if change.planned else 0
+            self._hunk = max(floor, min(self._hunk + delta, last))
             await self._show()
             self.query_one("#detail-pane").scroll_home(animate=False)
 
