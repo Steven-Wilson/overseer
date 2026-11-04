@@ -21,6 +21,7 @@ the same change.
 
 from __future__ import annotations
 
+from overseer import gitdiff
 from overseer.model import QUESTIONS, RISKS, Change, Link, Source, split_hunk_id
 from overseer.store import Store, _source_of
 
@@ -192,7 +193,10 @@ def apply_plan(store: Store, plan: object) -> list[Change]:
                 },
             )
         )
+    rev = gitdiff.head_rev()  # the checkout the agent chose these lines in
     for c in new:
+        for link in [*c.links, *(x for xs in c.hunk_links.values() for x in xs)]:
+            link.rev = rev
         store.save_change(c)
     keep = {c.id for c in new}
     for c in stale:

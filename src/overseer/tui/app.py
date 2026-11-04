@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 from overseer.editor import build_command, is_gui, resolve_editor
 from overseer.freshness import Freshness, freshness, take_snapshot, when
+from overseer.gitdiff import GitError, file_at, head_rev
 from overseer.model import (
     QUESTIONS,
     RISKS,
@@ -164,13 +167,21 @@ class ChangesetList(VimList):
         await self.app.finish_delete(name, event.key == "y")  # type: ignore[attr-defined]
 
 
+def is_pinned(link: Link, head: str) -> bool:
+    """True when the link was written against a different checkout than ours, so
+    its line numbers only mean something in that commit."""
+    return bool(link.rev and head and link.rev != head)
+
+
 class LinkItem(ListItem):
-    def __init__(self, link: Link) -> None:
+    def __init__(self, link: Link, head: str = "") -> None:
         label = Text()
         label.append(link.path + (f":{link.line}" if link.line else ""), style="bold")
         if link.note:
             label.append(f"  {link.note}", style="dim")
-        if not Path(link.path).exists():
+        if is_pinned(link, head):  # Enter opens a read-only copy from that commit
+            label.append(f"  @{link.rev[:7]}", style="dim cyan")
+        elif not Path(link.path).exists():
             label.append("  (not found)", style="dim red")
         super().__init__(Static(label))
         self.link = link
@@ -208,6 +219,7 @@ class OverseerApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
+        Binding("O", "open_working_tree", "Open working-tree file"),
         Binding("t", "toggle_text", "Tests/text"),
         Binding("c", "changesets", "Changesets"),
         Binding("d", "delete_changeset", "Delete changeset"),
@@ -237,7 +249,9 @@ class OverseerApp(App):
         self._remembered: dict[tuple[str, bool], str | None] = {}  # selection per view
         self._selected: str | None = None  # change id, stable across refreshes
         self._hunk = 0
-        self._shown_rows: list | None = None  # what the links list was built from
+        self._shown_rows: tuple | None = None  # what the links list was built from
+        self._head = ""  # our checkout's HEAD, to tell whether links match it
+        self._pin_dir: str | None = None  # temp dir of read-only pinned copies
         self._rebuilding = False  # ignore highlight events while the list is rebuilt
         self._notes: list[Note] = []
         self._snapshot: dict | None = None  # what the reviewer last marked reviewed
@@ -279,6 +293,7 @@ class OverseerApp(App):
             self._selected = self._remembered.get(view_key)
             self._hunk = 0
             self._shown_rows = None
+        self._head = head_rev()  # a checkout can change under us, like the store
         review = self.store.review()
         if review != self._review:
             self._review = review
@@ -415,9 +430,9 @@ class OverseerApp(App):
 
     async def _sync_links(self) -> None:
         rows = self._link_rows()
-        if rows == self._shown_rows:  # keep the cursor put while polling
+        if (rows, self._head) == self._shown_rows:  # keep the cursor put while polling
             return
-        self._shown_rows = rows
+        self._shown_rows = (rows, self._head)
         view = self.query_one("#links", ListView)
         await view.clear()
         items: list[ListItem] = []
@@ -427,7 +442,7 @@ class OverseerApp(App):
                     ListItem(Static(Text(str(value), style="bold")), disabled=True)
                 )
             else:
-                items.append(LinkItem(value))
+                items.append(LinkItem(value, self._head))
         if not items:
             items = [
                 ListItem(
@@ -489,6 +504,8 @@ class OverseerApp(App):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "delete_changeset":  # only meaningful (and shown) in the picker
             return self.query_one("#changesets").has_class("open")
+        if action == "open_working_tree":  # about the highlighted related-code row
+            return self.focused is not None and self.focused.id == "links"
         if action == "done_reviewing":
             return self._review.get("state") == "requested"
         return True
@@ -609,19 +626,58 @@ class OverseerApp(App):
         pane = self.query_one("#detail-pane")
         pane.scroll_relative(y=direction * max(1, pane.size.height // 2), animate=False)
 
-    def _open_link(self, link: Link) -> None:
+    def _open_link(self, link: Link, working_tree: bool = False) -> None:
+        """Open related code. On the commit the link was written against, that
+        is the real file (read/write). On any other checkout it is a read-only
+        copy from that commit, so the lines still mean what the agent meant;
+        `working_tree=True` (the O key) opens your own file regardless."""
         editor = resolve_editor()
         if not editor:
             self.notify("Set $EDITOR (or $VISUAL) to open code", severity="error")
-        elif not Path(link.path).exists():
-            self.notify(f"{link.path} not found in {Path.cwd()}", severity="error")
-        else:
+            return
+        target = link.path
+        if not working_tree and is_pinned(link, self._head):
             try:
-                self.run_editor(
-                    build_command(editor, link.path, link.line), is_gui(editor)
+                target = self._pinned_copy(link)
+                self.notify(
+                    f"{link.path} as of {link.rev[:7]}, read-only (you are on "
+                    f"{self._head[:7]}). O opens your working-tree file."
                 )
-            except OSError as e:
-                self.notify(f"Could not start {editor[0]}: {e}", severity="error")
+            except (GitError, OSError) as e:
+                self.notify(
+                    f"{link.rev[:7]} is not available here ({e}); opening your "
+                    "working-tree file, which may not match",
+                    severity="warning",
+                )
+        if target == link.path and not Path(link.path).exists():
+            self.notify(f"{link.path} not found in {Path.cwd()}", severity="error")
+            return
+        try:
+            self.run_editor(build_command(editor, target, link.line), is_gui(editor))
+        except OSError as e:
+            self.notify(f"Could not start {editor[0]}: {e}", severity="error")
+
+    def _pinned_copy(self, link: Link) -> str:
+        """`link.path` as committed in `link.rev`, as a read-only temp file that
+        keeps the real relative path (so the editor picks the right syntax)."""
+        if self._pin_dir is None:
+            self._pin_dir = tempfile.mkdtemp(prefix="overseer-")
+        dest = Path(self._pin_dir) / link.rev[:12] / link.path
+        if not dest.exists():
+            data = file_at(link.rev, link.path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            dest.chmod(0o444)
+        return str(dest)
+
+    def action_open_working_tree(self) -> None:
+        item = self.query_one("#links", ListView).highlighted_child
+        if isinstance(item, LinkItem):
+            self._open_link(item.link, working_tree=True)
+
+    def on_unmount(self) -> None:
+        if self._pin_dir:
+            shutil.rmtree(self._pin_dir, ignore_errors=True)
 
     def run_editor(self, cmd: list[str], gui: bool) -> None:
         if gui:  # opens its own window; keep the TUI running

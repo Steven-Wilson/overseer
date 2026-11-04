@@ -23,6 +23,26 @@ def _git(*args: str, cwd: str | None = None) -> str:
     return proc.stdout
 
 
+def head_rev(cwd: str | None = None) -> str:
+    """Full sha of HEAD, or "" outside a repo or in one with no commits."""
+    try:
+        return _git("rev-parse", "--verify", "HEAD", cwd=cwd).strip()
+    except (GitError, OSError):
+        return ""
+
+
+def file_at(rev: str, path: str, cwd: str | None = None) -> bytes:
+    """`path` (relative to the repo root) as committed in `rev`. Raises GitError
+    if the commit is not available locally or the file did not exist there."""
+    proc = subprocess.run(
+        ["git", "show", f"{rev}:{path}"], cwd=cwd, capture_output=True
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.decode(errors="replace").strip()
+        raise GitError(err or f"cannot read {path} at {rev[:7]}")
+    return proc.stdout
+
+
 def parse_patch(patch: str) -> list[Hunk]:
     """Split a unified `git diff` into hunks. Non-text file changes (binary,
     mode-only, empty new files) become a single line-less hunk with a note."""

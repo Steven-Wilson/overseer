@@ -77,6 +77,10 @@ class Link:
     path: str  # relative to the repo root (where the TUI is launched)
     line: int | None = None  # 1-based
     note: str = ""  # why it is related, a few words
+    # Full sha of the checkout the agent looked at when it picked this line, so a
+    # reviewer on a different checkout can open the code as the agent saw it.
+    # "" = unknown (older links), opened from the working tree as before.
+    rev: str = ""
 
 
 @dataclass

@@ -135,12 +135,14 @@ def _link(store: Store, args: argparse.Namespace) -> int:
         links = change.hunk_links.setdefault(args.hunk, [])
     else:
         links = change.links
+    rev = gitdiff.head_rev()
     for existing in links:
         if (existing.path, existing.line) == (path, line):
             existing.note = args.note or existing.note
+            existing.rev = rev  # re-asserted against the current checkout
             break
     else:
-        links.append(Link(path, line, args.note))
+        links.append(Link(path, line, args.note, rev))
     store.save_change(change)
     return 0
 
