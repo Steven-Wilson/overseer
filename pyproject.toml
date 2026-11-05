@@ -5,7 +5,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 description = "Semantic review of agentic code changes"
 authors = [
-    { name = "quikli", email = "8772312+Steven-Wilson@users.noreply.github.com" }
+    { name = "Steven Wilson", email = "8772312+Steven-Wilson@users.noreply.github.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
