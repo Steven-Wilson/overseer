@@ -1,5 +1,7 @@
-from overseer.freshness import freshness, line_hashes, take_baseline
-from overseer.model import Change, Delta, FileDiff, Source
+from conftest import chg, dele, ins
+
+from overseer.freshness import delta_hash, freshness, take_baseline
+from overseer.model import Change, FileDiff, Source
 from overseer.store import Store
 from overseer.tui.app import OverseerApp
 
@@ -14,35 +16,34 @@ def src(sid, *bodies, seq=1):
 
 def d(sid, body):
     """The delta covering the one changed line `src` makes in `<body>.py`."""
-    return Delta(sid, f"{body}.py", "1")
+    return ins(sid, f"{body}.py", "1", body)
 
 
 def labels(app):
     return [str(x.render()) for x in app.query("#changes Static")]
 
 
-def test_line_identity_ignores_header_line_numbers_but_not_content():
-    a = FileDiff("a.py", ["@@ -1,2 +1,3 @@ def f", "+x"])
-    moved = FileDiff("a.py", ["@@ -40,2 +41,3 @@ def f", " ctx", "+x"])
-    assert line_hashes(a) == line_hashes(moved)
-    assert line_hashes(a) != line_hashes(FileDiff("b.py", a.lines))
-    assert line_hashes(a) != line_hashes(FileDiff("a.py", ["@@ -1 +1 @@", "+y"]))
-    twice = line_hashes(FileDiff("a.py", ["@@ -1 +1 @@", "+x", "+x"]))
-    assert twice[0] != twice[1]  # identical text is told apart by occurrence
+def test_delta_identity_is_content_not_position():
+    a = ins("s", "a.py", "5", "x")
+    assert delta_hash(a) == delta_hash(ins("s", "a.py", "40", "x"))  # lines shifted
+    assert delta_hash(a) == delta_hash(ins("other", "a.py", "5", "x", summary="s"))
+    assert delta_hash(a) != delta_hash(ins("s", "b.py", "5", "x"))  # other file
+    assert delta_hash(a) != delta_hash(ins("s", "a.py", "5", "y"))  # other code
+    assert delta_hash(a) != delta_hash(dele("s", "a.py", "5", "x"))  # other kind
+    assert delta_hash(chg("s", "a.py", "p", "q")) != delta_hash(
+        chg("s", "a.py", "q", "p")
+    )
 
 
 def test_kinds_new_changed_updated_and_no_baseline():
-    s1 = src("s1", "a", "b")
-    sources = {"s1": s1}
     c = Change(
         "c1", "T", [d("s1", "a"), d("s1", "b")], answers={"why": "w"}, risk="green"
     )
-    assert freshness(c, sources, None).kind == ""  # no baseline: flag nothing
-    snap = take_baseline([c], sources)
-    assert freshness(c, sources, snap).kind == ""
+    assert freshness(c, None).kind == ""  # no baseline: flag nothing
+    snap = take_baseline([c])
+    assert freshness(c, snap).kind == ""
 
     # the change gains a delta from a new commit
-    both = {"s1": s1, "s2": src("s2", "c", seq=2)}
     grown = Change(
         "c1",
         "T",
@@ -50,37 +51,33 @@ def test_kinds_new_changed_updated_and_no_baseline():
         answers={"why": "w"},
         risk="green",
     )
-    f = freshness(grown, both, snap)
+    f = freshness(grown, snap)
     assert (f.kind, f.new_deltas, f.total, f.tag) == ("changed", [3], 3, "CHANGED +1")
 
-    assert (
-        freshness(Change("c9", "Brand new", [d("s2", "c")]), both, snap).kind == "new"
-    )
+    assert freshness(Change("c9", "Brand new", [d("s2", "c")]), snap).kind == "new"
 
     # same code, different explanation or risk
     same_code = Change(
         "c1", "T", [d("s1", "a"), d("s1", "b")], answers={"why": "w2"}, risk="red"
     )
-    assert freshness(same_code, sources, snap).kind == "updated"
+    assert freshness(same_code, snap).kind == "updated"
 
 
-def test_regrouping_or_recutting_deltas_does_not_look_new():
-    sources = {"s1": src("s1", "a", "b")}
-    snap = take_baseline(
-        [Change("old-01", "All", [d("s1", "a"), d("s1", "b")])], sources
-    )
+def test_regrouping_changes_does_not_look_new():
+    snap = take_baseline([Change("old-01", "All", [d("s1", "a"), d("s1", "b")])])
     split = [
         Change("new-01", "A", [d("s1", "a")]),
         Change("new-02", "B", [d("s1", "b")]),
     ]
-    assert [freshness(c, sources, snap).kind for c in split] == ["", ""]
+    assert [freshness(c, snap).kind for c in split] == ["", ""]
 
-    # one file with two changed lines, reviewed as one delta, later cut in two
-    two = {"s1": Source("s1", "m", [FileDiff("f.py", ["@@ -1 +1 @@", "+p", "+q"])])}
-    whole = Change("w", "W", [Delta("s1", "f.py", "1-2")])
-    snap = take_baseline([whole], two)
-    halves = Change("h", "H", [Delta("s1", "f.py", "1"), Delta("s1", "f.py", "2")])
-    assert freshness(halves, two, snap).kind == ""
+
+def test_a_redeclared_delta_with_different_code_is_changed():
+    snap = take_baseline([Change("c", "C", [ins("s1", "f.py", "1-2", "p\nq")])])
+    same = Change("c", "C", [ins("s1", "f.py", "9-10", "p\nq")])  # only moved down
+    assert freshness(same, snap).kind == ""
+    edited = Change("c", "C", [ins("s1", "f.py", "1-2", "p\nq\nr")])
+    assert freshness(edited, snap).kind == "new"
 
 
 async def test_tui_flags_changes_after_mark_reviewed(tmp_path):
@@ -128,7 +125,8 @@ async def test_tui_flags_changes_after_mark_reviewed(tmp_path):
         t = str(app.query_one("#detail").render())
         assert "CHANGED since your last review: delta 2 of 2 new" in t
         assert (
-            "Delta 2/2  c.py" in t and "NEW" in t.split("Delta 2/2")[1].splitlines()[0]
+            "Delta 2/2  insert c.py" in t
+            and "NEW" in t.split("Delta 2/2")[1].splitlines()[0]
         )
         await pilot.press("left_square_bracket")
         await pilot.pause()
@@ -180,7 +178,6 @@ def test_when_formats_the_baseline_and_tolerates_junk():
 
 
 def test_freshness_carries_the_baseline_time():
-    sources = {"s1": src("s1", "a")}
     c = Change("c1", "T", [d("s1", "a")])
-    snap = take_baseline([c], sources)
-    assert freshness(c, sources, snap).since == snap["at"]
+    snap = take_baseline([c])
+    assert freshness(c, snap).since == snap["at"]

@@ -3,14 +3,15 @@ import threading
 import time
 
 import pytest
+from conftest import chg, dele, ins, mov  # noqa: F401
 
 from overseer import cli
-from overseer.model import Change, Delta, FileDiff, Note, Source
+from overseer.model import Change, FileDiff, Note, Source
 from overseer.store import Store
 from overseer.tui.app import OverseerApp
 
-A = Delta("s1", "a.py", "1-2")
-B = Delta("s1", "b.py", "1")
+A = ins("s1", "a.py", "1-2")
+B = ins("s1", "b.py", "1")
 
 
 def seed(store):
@@ -47,10 +48,10 @@ def test_notes_json_has_context_and_stale_flag(tmp_path, monkeypatch, capsys):
     code, out = run(["notes", "--reviewset", "pr"], capsys)
     notes = {n["id"]: n for n in json.loads(out.out)}
     assert code == 0 and list(notes) == ["n1", "n2", "n3", "n4"]
-    assert notes["n1"]["context"]["path"] == "b.py"
-    assert notes["n1"]["context"]["diff"] == ["+y"]
-    assert notes["n1"]["context"]["new_lines"] == [1, 1]
-    assert notes["n1"]["context"]["changed_lines"] == "1"
+    ctx = notes["n1"]["context"]
+    assert ctx["kind"] == "insert" and ctx["before"] is None
+    assert ctx["after"]["path"] == "b.py" and ctx["after"]["lines"] == "1"
+    assert ctx["diff"] == ["+x"] and ctx["commit"] == "s1"
     assert notes["n2"]["context"]["change_title"] == "Part one"
     assert notes["n3"]["context"] == {}
     assert notes["n4"]["context"] == {"stale": True}

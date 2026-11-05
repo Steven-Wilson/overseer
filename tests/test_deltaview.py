@@ -1,120 +1,111 @@
-import pytest
+from conftest import chg, ins, mov
 
-from overseer.deltaview import delta_rows, new_range, plain, stats
-from overseer.model import Delta, FileDiff, format_lines, parse_lines
+from overseer.deltaview import (
+    change_rows,
+    move_view,
+    plain,
+    side_text,
+    stats,
+    uncovered,
+)
+from overseer.model import Change, FileDiff, Side, Source
 
-# changed lines: 1 "-old a", 2 "+new a", 3 "-old b", 4 "+new b"
-FILE = FileDiff(
-    "x.py",
+DIFF = FileDiff(
+    "a.py",
     [
-        "@@ -10,12 +10,12 @@ def foo():",
-        " c1",
-        " c2",
-        " c3",
-        "-old a",
-        "+new a",
-        " c4",
-        " c5",
-        " c6",
-        " c7",
-        "-old b",
-        "+new b",
-        " c8",
-        " c9",
+        "@@ -10,4 +10,5 @@ def f():",
+        " keep",
+        "-if a:",
+        "+if a and b:",
+        "+    extra()",
+        " tail",
     ],
 )
 
 
-def test_parse_and_format_lines_round_trip():
-    assert parse_lines("3-5,9", 10) == [3, 4, 5, 9]
-    assert parse_lines(" 9 , 3-4,4-5 ", 10) == [3, 4, 5, 9]
-    assert format_lines([9, 3, 4, 5, 4]) == "3-5,9"
-    assert format_lines([]) == ""
-    assert Delta("abc", "a/b#c.py", "3-5").id == "abc:a/b#c.py#3-5"
+def test_change_rows_emphasise_only_the_words_that_differ():
+    rows = change_rows(Side("a.py", "12", "if a:"), Side("a.py", "12", "if a and b:"))
+    old, new = rows
+    assert (old.sign, old.old, old.emph) == ("-", 12, [])
+    assert (new.sign, new.new) == ("+", 12)
+    assert new.text[new.emph[0][0] : new.emph[-1][1]] == " and b"
 
 
-@pytest.mark.parametrize("bad", ["", "a", "0", "3-", "-3", "5-3", "1-11", "11", "1,,2"])
-def test_parse_lines_rejects(bad):
-    with pytest.raises(ValueError):
-        parse_lines(bad, 10)
-
-
-def test_file_counts_changed_lines_only():
-    assert FILE.count == 4
-    assert FileDiff("b.bin", ["!(binary file changed)"]).count == 1
-
-
-def test_a_delta_shows_its_lines_with_context_and_real_line_numbers():
-    rows = delta_rows(FILE, {1, 2})
-    assert rows[0].kind == "gap" and rows[0].text == "def foo():"
-    body = [(r.kind, r.sign + r.text, r.old, r.new) for r in rows[1:]]
-    assert body == [
-        ("ctx", " c1", 10, 10),
-        ("ctx", " c2", 11, 11),
-        ("ctx", " c3", 12, 12),
-        ("sel", "-old a", 13, None),
-        ("sel", "+new a", None, 13),
-        ("ctx", " c4", 14, 14),
-        ("ctx", " c5", 15, 15),
-        ("ctx", " c6", 16, 16),
-    ]  # c7 and the second edit are out of the window
-    assert new_range(rows) == (13, 13)
-    assert plain(rows) == [
-        "... def foo():",
-        " c1",
-        " c2",
-        " c3",
-        "-old a",
-        "+new a",
-        " c4",
-        " c5",
-        " c6",
+def test_change_rows_keep_shared_lines_as_context():
+    before = Side("a.py", "10-12", "keep\nold\ntail")
+    after = Side("a.py", "10-13", "keep\nnew\nmore\ntail")
+    rows = change_rows(before, after)
+    assert [(r.kind, r.sign, r.text) for r in rows] == [
+        ("ctx", " ", "keep"),
+        ("sel", "-", "old"),
+        ("sel", "+", "new"),
+        ("sel", "+", "more"),
+        ("ctx", " ", "tail"),
     ]
+    assert (rows[0].old, rows[0].new) == (10, 10)
+    assert (rows[-1].old, rows[-1].new) == (12, 13)
 
 
-def test_neighbouring_changed_lines_of_other_deltas_are_marked_not_hidden():
-    rows = delta_rows(FILE, {2})  # only "+new a"
-    kinds = {r.sign + r.text: r.kind for r in rows if r.kind in ("sel", "other")}
-    assert kinds == {"-old a": "other", "+new a": "sel"}
-    # and they never read as unchanged context in the machine-readable form
-    assert "-old a" not in plain(rows)
+def test_a_rewritten_line_is_not_emphasised_word_by_word():
+    a, b = change_rows(Side("a", "1", "x = 1"), Side("a", "1", "y = totally_new()"))
+    assert a.emph == [] and b.emph == []
 
 
-def test_a_delta_spanning_git_hunks_gets_a_gap_with_the_later_function_name():
-    two = FileDiff(
-        "x.py",
-        [
-            "@@ -1,2 +1,2 @@ def a():",
-            "-p",
-            "+q",
-            "@@ -90,2 +90,2 @@ def z():",
-            "-r",
-            "+s",
-        ],
+def test_stats_follow_the_declared_kind():
+    assert stats(ins("s", "a.py", text="a\nb\nc")) == (3, 0)
+    assert stats(chg("s", "a.py", "if a:", "if a and b:")) == (1, 1)
+    assert stats(mov("s", "a.py", "p\nq", "b.py")) == (0, 0)
+
+
+def test_plain_is_the_declared_before_and_after():
+    assert plain(chg("s", "a.py", "x", "y")) == ["-x", "+y"]
+    assert plain(ins("s", "a.py", text="n1\nn2")) == ["+n1", "+n2"]
+
+
+def test_move_view_matches_lines_ignoring_indent_and_finds_reindent():
+    d = mov(
+        "s",
+        "a.py",
+        "y = compute(x)\nz = other(y)\nreturn z",
+        "b.py",
+        "        y = compute(x)\n        z = other(y, 2)\n        return z",
+        lines="2-4",
+        to_lines="5-7",
     )
-    rows = delta_rows(two, {1, 4})
-    assert [(r.kind, r.sign + r.text) for r in rows] == [
-        ("gap", "def a():"),
-        ("sel", "-p"),
-        ("other", "+q"),
-        ("gap", "def z():"),
-        ("other", "-r"),
-        ("sel", "+s"),
-    ]
-    assert rows[5].new == 90
+    v = move_view(d)
+    assert (v.same, v.total) == (2, 3)
+    assert [r.match for r in v.removed] == [True, False, True]
+    assert [r.match for r in v.added] == [True, False, True]
+    assert v.reindent == 8  # every matched line moved in by 8
+    assert (v.removed[0].old, v.added[0].new) == (2, 5)
 
 
-def test_non_text_change_is_a_note_row():
-    rows = delta_rows(FileDiff("b.bin", ["!(binary file changed)"]), {1})
-    assert [(r.kind, r.text) for r in rows] == [("note", "(binary file changed)")]
-    assert new_range(rows) is None
+def test_move_view_reports_a_uniform_reindent():
+    d = mov("s", "a.py", "a = 1\nb = 2", "b.py", "    a = 1\n    b = 2")
+    assert move_view(d).reindent == 4
 
 
-def test_no_newline_marker_stays_with_its_line():
-    f = FileDiff("x", ["@@ -1 +1 @@", "-a", "\\ No newline at end of file", "+b"])
-    texts = [r.sign + r.text for r in delta_rows(f, {2})]
-    assert texts == ["-a", "\\ No newline at end of file", "+b"]
+def test_side_text_copies_what_the_diff_shows():
+    assert side_text(DIFF, "old", [11]) == "if a:"
+    assert side_text(DIFF, "new", [11, 12]) == "if a and b:\n    extra()"
+    assert side_text(DIFF, "old", [10, 11]) == "keep\nif a:"
+    assert side_text(DIFF, "old", [40]) is None  # not in the diff: agent must say
+    assert side_text(DIFF, "new", [13]) == "tail"
 
 
-def test_stats_count_added_and_removed_in_the_delta():
-    assert stats(FILE, [1, 2, 4]) == (2, 1)
+def test_uncovered_reports_lines_no_delta_mentions():
+    src = Source("s", "m", [DIFF])
+    only_change = Change("c", "t", [chg("s", "a.py", lines="11")])
+    (gap,) = uncovered([only_change], {"s": src})
+    assert (gap.path, gap.old, gap.new) == (
+        "a.py",
+        [],
+        [12],
+    )  # only `extra()` is unmentioned
+    full = Change(
+        "c",
+        "t",
+        [chg("s", "a.py", lines="11"), ins("s", "a.py", "12")],
+    )
+    assert uncovered([full], {"s": src}) == []
+    assert uncovered([Change("c", "t", [])], {"s": src}) == []

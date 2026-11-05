@@ -13,7 +13,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
-from overseer.deltaview import kind_of, stats
+from overseer.deltaview import count, stats, uncovered
 from overseer.editor import build_command, is_gui, resolve_editor
 from overseer.freshness import Freshness, freshness, take_baseline, when
 from overseer.gitdiff import GitError, file_at, head_rev
@@ -71,18 +71,25 @@ def note_count(change: Change, notes: list[Note]) -> tuple[int, int]:
 
 
 def delta_title(r: Resolved) -> Text:
-    """`path +3 −1`, with what kind of delta it is when that is not a plain edit."""
+    """`kind path +3 −1`: what the agent declared this delta to be."""
+    d = r.delta
     t = Text()
-    if r.delta.moved:
-        t.append(f"{r.delta.path} → {r.delta.to_path}", style="cyan")
-        t.append(f"  moved {len(r.numbers)} lines", style="dim")
+    if d.kind == "raw":
+        t.append(f"{d.path}  unclassified", style="yellow")
+        added, removed = stats(d)
+        t.append(f"  +{added} −{removed}", style="dim")
         return t
-    t.append(r.delta.path, style="cyan")
-    added, removed = stats(r.file, r.numbers)
+    color = {"insert": "green", "delete": "red", "move": "cyan"}.get(d.kind, "")
+    t.append(f"{d.kind} ", style=f"bold {color}".strip())
+    if d.kind == "move":
+        t.append(f"{d.before.path} → {d.after.path}", style="cyan")
+        t.append(f"  {count(d.before)} lines", style="dim")
+        return t
+    t.append(d.path, style="cyan")
+    if d.before and d.before.symbol or d.after and d.after.symbol:
+        t.append(f" · {(d.after or d.before).symbol or d.before.symbol}", style="dim")
+    added, removed = stats(d)
     t.append(f"  +{added} −{removed}", style="dim")
-    kind = kind_of(r.file, r.numbers)
-    if kind != "edit":
-        t.append(f"  {kind} section", style="green" if kind == "added" else "red")
     return t
 
 
@@ -141,7 +148,7 @@ def render_change(
             out.append("\n")
         seen: set[str] = set()
         for r in deltas:  # the commit(s) this change is cut from
-            if r.source.id not in seen:
+            if r.source and r.source.id not in seen:
                 seen.add(r.source.id)
                 out.append(f"Commit {r.source.id}\n", style="dim")
                 out.append(f"{r.source.message}\n\n", style="dim")
@@ -157,7 +164,7 @@ def render_change(
     if deltas:
         delta_index = max(0, min(delta_index, len(deltas) - 1))
         r = deltas[delta_index]
-        if not change.planned:  # no overview to carry the commit message
+        if not change.planned and r.source:  # no overview to carry the message
             out.append(f"Commit {r.source.id}\n", style="dim")
             out.append(f"{r.source.message}\n\n", style="dim")
         out.append(f"Delta {delta_index + 1}/{len(deltas)}  ", style="bold cyan")
@@ -345,9 +352,7 @@ class OverseerApp(App):
         baseline = self.store.reviewed()
         self._everything = everything
         # A changed change must not hide in the other view, so count both.
-        is_fresh = {
-            c.id: bool(freshness(c, sources, baseline).kind) for c in everything
-        }
+        is_fresh = {c.id: bool(freshness(c, baseline).kind) for c in everything}
         here = sum(is_fresh[c.id] for c in changes)
         there = sum(is_fresh.values()) - here
         since = f"  ·  {here} changed since review" if here else ""
@@ -358,6 +363,10 @@ class OverseerApp(App):
             away = f" ({there} changed)" if there else ""
             hidden = f"  ·  t: {other} white hidden{away}"
             title = f"Changes{since}" + (hidden if other else "")
+        gaps = uncovered([c for c in everything if c.planned], sources)
+        missing = sum(len(g.old) + len(g.new) for g in gaps)
+        if missing:  # the agent left these out; never silent
+            title += f"  ·  ⚠ {missing} changed lines in no delta"
         self.query_one("#changes").border_title = title
         notes = self.store.notes()
         same_changes = [c.to_dict() for c in changes] == [
@@ -404,12 +413,12 @@ class OverseerApp(App):
         if not change.planned:
             label.append(" (whole commit)", style="dim yellow")
         deltas = resolve_deltas(change, self._sources)
-        files = len({p for r in deltas for p in (r.delta.path, r.delta.to_path) if p})
+        files = len({p for r in deltas for p in r.delta.paths})
         label.append(
             f"\n  {_plural(len(deltas), 'delta')} · {_plural(files, 'file')}",
             style="dim",
         )
-        fresh = freshness(change, self._sources, self._baseline)
+        fresh = freshness(change, self._baseline)
         if fresh.kind:
             label.append(f" · {fresh.tag}", style="bold cyan")
         opened, addressed = note_count(change, self._notes)
@@ -447,7 +456,7 @@ class OverseerApp(App):
         detail = self.query_one("#detail", Static)
         if change:
             deltas = resolve_deltas(change, self._sources)
-            fresh = freshness(change, self._sources, self._baseline)
+            fresh = freshness(change, self._baseline)
             detail.update(
                 render_change(change, deltas, self._delta, self._notes, fresh)
             )
@@ -602,13 +611,13 @@ class OverseerApp(App):
         if self._review.get("state") != "requested":
             return
         self.store.set_review("done", self._review.get("message", ""))
-        self.store.save_reviewed(take_baseline(self._everything, self._sources))
+        self.store.save_reviewed(take_baseline(self._everything))
         self.notify("Marked review done; the agent can now read your notes")
         await self.action_refresh()
 
     async def action_mark_reviewed(self) -> None:
         """Take the "since last review" baseline now, without any agent waiting."""
-        self.store.save_reviewed(take_baseline(self._everything, self._sources))
+        self.store.save_reviewed(take_baseline(self._everything))
         self.notify("Marked everything reviewed; changes from now on will be flagged")
         await self.action_refresh()
 

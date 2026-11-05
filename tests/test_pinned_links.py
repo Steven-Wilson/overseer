@@ -4,10 +4,11 @@ import stat
 import subprocess
 
 import pytest
+from conftest import chg, dele, ins, mov  # noqa: F401
 
 from overseer import cli
 from overseer.gitdiff import GitError, file_at, head_rev
-from overseer.model import Change, Delta, FileDiff, Link, Source
+from overseer.model import Change, FileDiff, Link, Source
 from overseer.store import Store
 from overseer.tui.app import OverseerApp
 
@@ -64,8 +65,9 @@ def test_links_record_the_checkout_they_were_written_in(repo, tmp_path, monkeypa
                 "related": [{"path": "b.py", "line": 2}],
                 "deltas": [
                     {
+                        "kind": "insert",
                         "commit": sha,
-                        "path": "b.py",
+                        "after": {"path": "b.py", "lines": "1"},
                         "related": [{"path": "b.py", "line": 1}],
                     }
                 ],
@@ -94,7 +96,7 @@ def app_with_link(tmp_path, rev, monkeypatch):
         Change(
             "s1-01",
             "T",
-            [Delta("s1", "b.py", "1")],
+            [ins("s1", "b.py", "1")],
             planned=True,
             links=[Link("b.py", 2, "the second line", rev)],
         )

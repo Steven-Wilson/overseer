@@ -1,7 +1,9 @@
 import json
 
+from conftest import chg, dele, ins, mov  # noqa: F401
+
 from overseer import cli
-from overseer.model import Change, Delta, FileDiff, Source
+from overseer.model import Change, FileDiff, Source
 from overseer.planning import default_change
 from overseer.store import Store
 
@@ -48,9 +50,9 @@ def test_changes_ordered_by_source_then_position(tmp_path):
     store.save_source(
         Source("early", "E", [FileDiff("a", ["+x"]), FileDiff("b", ["+y"])], seq=1)
     )
-    store.save_change(Change("late", "L", [Delta("late", "a", "1")]))
-    store.save_change(Change("early-02", "E2", [Delta("early", "b", "1")], position=2))
-    store.save_change(Change("early-01", "E1", [Delta("early", "a", "1")], position=1))
+    store.save_change(Change("late", "L", [ins("late", "a", "1")]))
+    store.save_change(Change("early-02", "E2", [ins("early", "b", "1")], position=2))
+    store.save_change(Change("early-01", "E1", [ins("early", "a", "1")], position=1))
     assert [c.id for c in store.changes()] == ["early-01", "early-02", "late"]
 
 
@@ -84,7 +86,7 @@ def test_record_risk(tmp_path, monkeypatch, capsys):
 def test_link_command(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OVERSEER_DIR", str(tmp_path))
     store = Store()
-    store.save_change(Change("c1", "t", [Delta("s", "a.py", "1")]))
+    store.save_change(Change("c1", "t", [ins("s", "a.py", "1")]))
     assert (
         cli.main(
             ["link", "c1", "src/a.py:12", "--note", "caller", "--reviewset", "default"]
@@ -105,7 +107,7 @@ def test_link_command(tmp_path, monkeypatch, capsys):
         )
         == 0
     )
-    delta = "s:a.py#1"
+    delta = "s:insert@a.py:1"
     assert (
         cli.main(
             ["link", "c1", "README.md", "--delta", delta, "--reviewset", "default"]

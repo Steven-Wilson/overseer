@@ -12,7 +12,7 @@ in the overseer repo itself use `uv run overseer-cli`.
 
 ## Vocabulary
 
-Use these terms, in chat, titles, answers and summaries, exactly as the README's Vocabulary table defines them: **reviewer** (the person; never "the human" or "the user"), **agent** (you), **commit**, **changed line**, **delta**, **move**, **section**, **change**, **whole commit** (an undecomposed change), **decompose**, **plan**, **review order**, **answer** (to one of the eight **review questions**), **delta summary**, **related code**, **risk** (green/yellow/red/white) and **risk reason**, **reviewset**, **note**, **baseline**. Do not invent synonyms ("PR chunk", "diff section", "hunk" for a delta, "link" for related code in prose, "snapshot" for baseline). A **delta is not a git hunk**: you choose it, and it can be a slice of one hunk or span several. CLI names stay as they are (`--unplanned` lists whole commits; `link` / `related` carry related code).
+Use these terms, in chat, titles, answers and summaries, exactly as the README's Vocabulary table defines them: **reviewer** (the person; never "the human" or "the user"), **agent** (you), **commit**, **changed line**, **delta**, **move**, **section**, **change**, **whole commit** (an undecomposed change), **decompose**, **plan**, **review order**, **answer** (to one of the eight **review questions**), **delta summary**, **related code**, **risk** (green/yellow/red/white) and **risk reason**, **reviewset**, **note**, **baseline**. Do not invent synonyms ("PR chunk", "diff section", "hunk" for a delta, "link" for related code in prose, "snapshot" for baseline). A **delta is not a git hunk**: you declare it. CLI names stay as they are (`--unplanned` lists whole commits; `link` / `related` carry related code).
 
 ## Reviewsets
 
@@ -22,51 +22,57 @@ Review material is grouped into **reviewsets** (e.g. `local`, `pr-123`) so the r
 
 For a PR, fetch it so the range resolves (e.g. `gh pr checkout` or `git fetch origin pull/123/head:pr-123`), then ingest `<base>..pr-123` into its own reviewset.
 
-## What you are cutting
+## What you are declaring
+
+Overseer cannot know what a change *means*; only you can. So you do not point at diff lines and let the tool guess: you **declare** each delta, saying what it is and what the code looked like. What you declare is the source of truth for how the reviewer sees it.
 
 - A **change** is one intention you can state in a sentence ("renamed `foo` to `bar`", "guarded the empty case"). Title it that way.
-- A **delta** is the smallest piece of a change worth reviewing on its own: the changed lines of **one file** that belong together. A rename touching five files is one change of five deltas; a function that gains an early return and a new helper in the same file may be one change of two deltas.
-- A **changed line** is a `+` or `-` line of the diff. `show` numbers them 1, 2, 3, ... per file. You pick deltas by those numbers (`"3-5,9"`). Git's own hunk boundaries do not matter: cut across them, or inside them, wherever the intention changes. Context lines have no number and need no assigning.
+- A **delta** is the smallest piece of a change worth reviewing on its own. It has a `kind`, and the code at each end:
+  - `insert`: new code. Give `after` (where it is now and what it looks like). Shown whole, syntax highlighted, green bar.
+  - `delete`: code removed. Give `before`. Red bar.
+  - `change`: X became Y in one file ("`if a:` became `if a and b:`"). Give `before` and `after`. Shown as a small diff with the changed words emphasised. Keep these small and focused.
+  - `move`: code relocated (extracted into a function, nested under a new `if`, carried to another file). Give `before` (where it was, what it looked like) and `after` (where it is, what it looks like). Shown as *removed from here* / *added here*.
+- Each end (`before`/`after`) is `{"path", "lines", "symbol", "text"}`: the file, the line or range in the file *at that end* (`"12"` or `"12-20"`: old-file numbers for `before`, new-file numbers for `after`, as `show` prints them), the enclosing function or class (`symbol`, give it whenever there is one), and `text`, the code as it looked there. Leave `text` out when the commit's diff shows those lines and Overseer copies it; include it whenever the diff does not (or you want to show something other than the raw lines). Overseer does not check your `text` against the commit.
+- Git's hunk boundaries do not matter. Declare the pieces you mean, however they fall in the diff.
 
-How a delta is shown follows from its lines, so cut with that in mind:
-- only added lines: an **added section**, shown whole with syntax highlighting and a green bar; only removed lines: a **removed section** (red bar). A new function or a deleted block should be one such delta, not scattered.
-- a mix of removed and added lines: an **edit**, shown as a diff with the exact changed words emphasised. Keep these small and focused (an added or dropped condition, a changed argument).
-- **moved code**: git shows a block that moved as an unrelated deletion and addition. Do not leave it that way; see "Moves" below.
-
-Do not make deltas bigger than one idea or smaller than the reviewer would want to read separately. Do not split a pair of adjacent lines that only make sense together (a `-` line and the `+` line replacing it).
+Do not make deltas bigger than one idea or smaller than the reviewer would want to read separately. A `-` line and the `+` line that replaces it are one `change`, not a delete plus an insert.
 
 ## Moves
 
-When code is relocated (extracted from a function body into a standalone function, nested under a new `if`, carried to another file), make the relocation **one delta with two ends** and put everything else that changed in *separate* deltas, so the reviewer sees "removed from here, added here" once, and the new branch or new signature is judged on its own.
+When code is relocated, declare it as **one `move` delta** and declare everything else that changed around it as *separate* deltas, so the reviewer sees "removed from here, added here" once, and the new branch or new signature is judged on its own.
 
-`overseer-cli show` ends with **Possible moves**: removed lines that reappear as added lines, ignoring indentation. They are hints from a text match; confirm by reading before using one. A move delta names the removed lines (`path`, `lines`) and where they went (`moved_to`), e.g. after extracting a block into a new function that guards it with an `if`:
+`overseer-cli show` ends with **Possible moves**: removed lines that reappear as added lines, ignoring indentation. They are only hints from a text match; confirm by reading before using one. For example, after extracting a block into a new function that guards it with an `if`:
 
 ```json
-{"commit": "abc1234", "path": "src/a.py", "lines": "1-5",
- "moved_to": {"path": "src/b.py", "lines": "3-7"},
+{"kind": "move", "commit": "abc1234",
+ "before": {"path": "src/a.py", "symbol": "run", "lines": "2-6"},
+ "after":  {"path": "src/b.py", "symbol": "helper", "lines": "4-8"},
  "summary": "The loop body, moved unchanged and re-indented"},
-{"commit": "abc1234", "path": "src/b.py", "lines": "1-2",
+{"kind": "insert", "commit": "abc1234",
+ "after": {"path": "src/b.py", "symbol": "helper", "lines": "2-3"},
  "summary": "The new function and the `if` that now guards the moved block"},
-{"commit": "abc1234", "path": "src/a.py", "lines": "6-7",
+{"kind": "change", "commit": "abc1234",
+ "before": {"path": "src/a.py", "symbol": "run", "lines": "7"},
+ "after":  {"path": "src/a.py", "symbol": "run", "lines": "2"},
  "summary": "The call that replaces the block"}
 ```
 
-The removed lines must all be `-` lines and the destination lines all `+` lines, and both ends count toward "every changed line in exactly one delta". If the code was edited on the way, still use one move delta: the TUI tints the lines with no match on the other side. Do not use a move for code that was merely rewritten, or when only a few lines match.
+If the code was edited on the way, still declare one move: the TUI tints lines with no match on the other side. Do not call something a move when it was merely rewritten, or when only a few lines match.
 
 ## Procedure
 
-1. **Ingest**: `overseer-cli ingest <rev> --reviewset <name>` (`HEAD`, a sha, or `A..B`). Re-running is safe. Output shows the file and changed-line counts per commit.
-2. **Read**: `overseer-cli show <sha> --reviewset <name>` prints the commit message, then each file's diff with its changed lines numbered (`--json` gives the same as data). Read all of it, and read surrounding code in the repo when a line's purpose isn't clear from the diff.
-3. **Group** the changed lines into changes, then cut each change into deltas:
+1. **Ingest**: `overseer-cli ingest <rev> --reviewset <name>` (`HEAD`, a sha, or `A..B`). Re-running is safe. Output shows the file and changed-line counts per commit (it also stores each file as one unclassified `raw` delta until you plan).
+2. **Read**: `overseer-cli show <sha> --reviewset <name>` prints the commit message, then each file's diff with old/new line numbers beside every line (`--json` gives the same as data). Read all of it, and read surrounding code in the repo when a line's purpose isn't clear from the diff.
+3. **Group** the commit's changes into changes, then declare each change's deltas:
    - one purpose per change (a refactor, a behavior change, tests, a rename, config), not one per file;
-   - within a change, one delta per file, or several when one file holds distinct pieces of it (use `lines` to pick them; omit `lines` to take the whole file);
-   - relocated code is a move (see "Moves"): check `show`'s Possible moves before cutting;
+   - within a change, one delta per piece, in any number of files;
+   - relocated code is a `move` (see "Moves"): check `show`'s Possible moves before declaring;
    - keep mechanical noise (renames, formatting, moved code) separate from logic changes, so the reviewer can skim it;
    - tests go with the behavior they cover unless large;
    - write changes in review order, so each makes sense after the previous one; order deltas within a change the same way
      (the TUI lists red first, then yellow, unrated, green, keeping your order within each tier; `white` changes are hidden behind a key, so write each change to stand reasonably alone rather than relying on the previous one);
    - a small commit may stay a single change. Do not split for its own sake.
-4. **Check coverage**: every changed line of every file of every commit in the plan must land in exactly one delta. The plan is rejected otherwise, and the error names the missing or doubled line numbers.
+4. **Account for everything**: Overseer does not force you to cover every changed line (you are the authority on what the change is), but it reports any changed line no delta mentions, as a `warning:` when you submit and a `⚠ N changed lines in no delta` badge in the TUI. Treat a warning as a likely omission: declare the missing piece, or accept that the reviewer will see the badge.
 5. **Answer** the review questions for each change via `answers`. Valid keys: `mechanical`, `semantic`, `why`, `impact`, `behavior`, `patterns`, `refactor`, `coverage` (the eight review questions). Include only answers you can support from the code and commit message; do not guess intent. For `why`, say so when the commit message gives no reason. Use `patterns`/`refactor` to flag duplication of existing code you actually found. Keep each answer to one or two sentences.
    **Scale commentary to risk** (so rate risk, step 7, first): the reviewer's attention is the scarce resource, and an unanswered question is fine. Do not answer all eight by default; omit any question whose answer is obvious from the title, the diff, or another answer.
    - `white` and `green`: almost nothing, often a single short `mechanical` or `why`, or no answers at all.
@@ -97,16 +103,23 @@ The removed lines must all be `-` lines and the destination lines all `+` lines,
       "answers": {"semantic": "...", "why": "..."},
       "related": [{"path": "src/overseer/cli.py", "line": 40, "note": "only caller"}],
       "deltas": [
-        {"commit": "abc1234", "path": "src/overseer/gitdiff.py", "lines": "1-30",
+        {"kind": "move", "commit": "abc1234",
+         "before": {"path": "src/overseer/cli.py", "symbol": "parse", "lines": "10-39"},
+         "after":  {"path": "src/overseer/gitdiff.py", "symbol": "parse_patch",
+                    "lines": "1-30"},
          "summary": "The parser, moved here unchanged"},
-        {"commit": "abc1234", "path": "src/overseer/cli.py", "lines": "1-6,40-41",
+        {"kind": "change", "commit": "abc1234",
+         "before": {"path": "src/overseer/cli.py", "symbol": "ingest",
+                    "lines": "40", "text": "src = parse(raw)"},
+         "after":  {"path": "src/overseer/cli.py", "symbol": "ingest",
+                    "lines": "11", "text": "src = gitdiff.parse_patch(raw)"},
          "summary": "cli.py now calls it",
          "related": [{"path": "tests/test_x.py", "line": 12}]}
       ]}
    ]}
    ```
 
-   `lines` are the changed-line numbers `show` printed (`"3-5,9"`); leave it out for the whole file. Every changed line of every file of every commit the plan mentions must be in **exactly one** delta. On any problem nothing is written and each problem is printed; fix the plan and resubmit. A plan may mix commits when one logical change spans them (then cover all changed lines of all those commits).
+   `lines` are line numbers in the file at that end, as `show` printed them. Forms a plan is rejected for (nothing is written): unknown `kind`/commit, a `kind` missing a side it needs (or carrying one it must not have: `insert` only `after`, `delete` only `before`, `change` and `move` both; a `change` stays in one file), malformed `lines`, missing `text` that the commit's diff cannot supply, the same delta declared twice, bad risk/answers/related. A plan may mix commits when one logical change spans them.
 9. **Verify**: `overseer-cli list --reviewset <name>` should show your changes with `"planned": true`; each delta's `id` is what notes and `record --delta` use.
 
 Later corrections (also with `--reviewset`): `overseer-cli record <change-id> --question why --text "..."` `--title "..."`, or `--risk green|yellow|red|white --risk-reason "..."`. The reviewer views everything with `overseer` (the TUI).

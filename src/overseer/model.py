@@ -9,8 +9,9 @@ Two layers:
   (possibly from several sources) and carrying the answers. A large or
   multi-purpose commit is decomposed into several `Change`s by an agent via
   `overseer-cli plan`.
-* `Delta` — the atomic unit of review: some changed lines of one file, chosen
-  by the agent. Not a git hunk: it can be a slice of one or span several.
+* `Delta` — the atomic unit of review, *declared by the agent*: an insert, a
+  delete, a change (before/after) or a move (from here, to there), each with the
+  code as it looked. The code never infers what a change means.
 * `Note` — the reviewer's feedback, attached to a delta, a change or a whole
   reviewset, for an agent to read back and act on.
 
@@ -126,26 +127,23 @@ class Source:
         return cls(**data)
 
 
-def parse_lines(spec: str, count: int) -> list[int]:
-    """`"3-5,9"` -> [3, 4, 5, 9], checked against a file with `count` changed
-    lines. Raises ValueError saying what is wrong."""
+def parse_lines(spec: str, count: int | None = None) -> list[int]:
+    """`"3-5,9"` -> [3, 4, 5, 9]; with `count`, also checked against a file of
+    that many lines. Raises ValueError saying what is wrong."""
     nums: set[int] = set()
     for part in spec.split(","):
         lo, sep, hi = part.strip().partition("-")
         if not lo.strip().isdigit() or (sep and not hi.strip().isdigit()):
             raise ValueError(f"bad line spec {spec!r}: use numbers like '3-5,9'")
         first, last = int(lo), int(hi) if sep else int(lo)
-        if first < 1 or last < first or last > count:
-            raise ValueError(
-                f"lines {part.strip()!r} out of range (the file has {count} "
-                "changed lines, numbered from 1)"
-            )
+        if first < 1 or last < first or (count is not None and last > count):
+            raise ValueError(f"lines {part.strip()!r} out of range")
         nums.update(range(first, last + 1))
     return sorted(nums)
 
 
 def format_lines(numbers: Iterable[int]) -> str:
-    """The canonical spec for changed-line numbers: `[3, 4, 5, 9]` -> `"3-5,9"`."""
+    """The canonical spec for line numbers: `[3, 4, 5, 9]` -> `"3-5,9"`."""
     runs: list[list[int]] = []
     for n in sorted(set(numbers)):
         if runs and n == runs[-1][1] + 1:
@@ -155,35 +153,76 @@ def format_lines(numbers: Iterable[int]) -> str:
     return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
 
 
+# What the agent says a delta *is*. Declared, never inferred: only the agent
+# knows the meaning of a change, so the code stores and shows what it was told.
+#   insert  new code:        `after`
+#   delete  code removed:    `before`
+#   change  X became Y:      `before` and `after`, same file
+#   move    code relocated:  `before` (where it was) and `after` (where it is)
+#   raw     not classified:  the file's git diff, as ingest left it (a default,
+#           shown as such, until an agent replaces it with declared deltas)
+DELTA_KINDS = ("insert", "delete", "change", "move", "raw")
+
+
+@dataclass
+class Side:
+    """One end of a delta: where the code is (or was) and what it looks like."""
+
+    path: str
+    lines: str  # first line, or a range: "12" / "12-20" (in the file at that end)
+    text: str  # the code itself, as the agent saw it there
+    symbol: str = ""  # enclosing function/class, if any
+
+    @property
+    def start(self) -> int:
+        return parse_lines(self.lines)[0] if self.lines else 1
+
+    @property
+    def where(self) -> str:
+        return f"{self.path}:{self.lines}" if self.lines else self.path
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 @dataclass
 class Delta:
-    """Changed lines of one file in one commit. `lines` is a canonical spec of
-    changed-line numbers (see `parse_lines`); the id is its address.
+    """The atomic unit of review, declared by the agent: a `kind` plus the
+    `before` and/or `after` side it implies (see `DELTA_KINDS`). `commit` is the
+    commit it was cut from."""
 
-    A *move* (code relocated: extracted into a function, nested under a new `if`,
-    carried to another file) is one delta with two ends: the removed lines at
-    `path`/`lines` and the added lines at `to_path`/`to_lines` (same commit). The
-    reviewer then sees "removed from here, added here" instead of two unrelated
-    blobs, and what else changed around it stays a separate delta."""
-
-    commit: str  # Source id
-    path: str
-    lines: str  # e.g. "3-5,9"
+    kind: str
+    commit: str
+    before: Side | None = None
+    after: Side | None = None
     # One sentence: what this delta does and why it sits here in the order. Shown
     # instead of the change-wide answers while stepping deltas.
     summary: str = ""
     links: list[Link] = field(default_factory=list)  # related code for this delta
-    to_path: str = ""  # a move's destination file; "" = not a move
-    to_lines: str = ""  # the added lines there
+    diff: list[str] = field(default_factory=list)  # kind "raw": the file's diff lines
 
     @property
     def moved(self) -> bool:
-        return bool(self.to_path)
+        return self.kind == "move"
+
+    @property
+    def paths(self) -> list[str]:
+        """The files it touches, `before` first."""
+        out = [s.path for s in (self.before, self.after) if s]
+        return out[:1] if len(set(out)) == 1 else out
+
+    @property
+    def path(self) -> str:
+        return self.paths[0]
 
     @property
     def id(self) -> str:
-        base = f"{self.commit}:{self.path}#{self.lines}"
-        return f"{base}>{self.to_path}#{self.to_lines}" if self.moved else base
+        """Stable address: the commit, the kind and where it sits. Notes use it,
+        so cutting the same delta again keeps its notes."""
+        if self.kind == "raw":
+            return f"{self.commit}:raw@{self.path}"
+        where = ">".join(s.where for s in (self.before, self.after) if s)
+        return f"{self.commit}:{self.kind}@{where}"
 
     def to_dict(self) -> dict:
         return {"id": self.id, **asdict(self)}
@@ -192,24 +231,9 @@ class Delta:
     def from_dict(cls, data: dict) -> Delta:
         data = {k: v for k, v in data.items() if k != "id"}
         data["links"] = [Link(**x) for x in data.get("links", [])]
+        for key in ("before", "after"):
+            data[key] = Side(**data[key]) if data.get(key) else None
         return cls(**data)
-
-
-def split_delta_id(delta_id: str) -> tuple[str, str, str, str, str]:
-    """`abc1234:src/x.py#3-5,9` -> (`abc1234`, `src/x.py`, `3-5,9`, ``, ``); a
-    move `abc1234:a.py#1-4>b.py#7-10` also yields its destination path and lines.
-    Raises ValueError if malformed."""
-    commit, colon, rest = delta_id.partition(":")
-    head, gt, tail = rest.rpartition(">")
-    if gt and "#" in tail:
-        to_path, _, to_lines = tail.rpartition("#")
-    else:
-        head, to_path, to_lines = rest, "", ""
-    path, hash_, spec = head.rpartition("#")
-    ok = colon and hash_ and commit and path and spec
-    if not ok or bool(to_path) != bool(to_lines) or (gt and not to_path):
-        raise ValueError(f"malformed delta id {delta_id!r}")
-    return commit, path, spec, to_path, to_lines
 
 
 @dataclass

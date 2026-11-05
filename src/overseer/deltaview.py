@@ -1,11 +1,11 @@
-"""Show one delta: its changed lines plus a little context, with real line numbers.
+"""What to show for a declared delta, and how it relates to the raw commit.
 
-A `Delta` is a set of changed lines of one file, chosen by the agent, so it does
-not line up with git's hunks. This module cuts it out of the stored `FileDiff`:
-the delta's own lines, a few lines of context around them, and, dimmed, any
-changed lines in that window that belong to *other* deltas (so a context line is
-never a lie). Git's `@@` headers are used for line numbers and for the enclosing
-function name, and are otherwise not shown.
+The agent declares each delta (kind, where, what the code looked like); nothing
+here decides what a change *means*. This module only lays the declared text out:
+a before/after pair as a small diff with the differing words marked, a move as
+two matched sides. It also reads the raw git diff for two conveniences:
+`side_text` (fill in code the agent located but did not retype) and `uncovered`
+(changed lines no delta accounts for, a warning, never a rejection).
 
 Nothing here may import textual.
 """
@@ -16,18 +16,16 @@ import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
-from overseer.model import FileDiff, is_changed
+from overseer.model import Change, Delta, FileDiff, Side, Source, parse_lines
 
-CONTEXT = 3
 _HEADER = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@ ?(.*)")
 
 
 @dataclass
 class Row:
-    kind: str  # "sel" in the delta | "other" changed line of another delta |
-    #            "ctx" unchanged | "gap" lines skipped | "note" non-text change
-    sign: str = ""  # "+", "-" or " " (blank for gap/note)
-    text: str = ""  # the line without its sign; for a gap, the enclosing function
+    kind: str  # "sel" a changed line | "ctx" unchanged | "note" non-text change
+    sign: str = ""  # "+", "-" or " " (blank for a note)
+    text: str = ""  # the line without its sign
     old: int | None = None  # line number before the commit
     new: int | None = None  # line number after the commit
     # character ranges of `text` that differ from the paired line on the other
@@ -38,7 +36,7 @@ class Row:
 
 
 @dataclass
-class _Entry:
+class Entry:
     kind: str  # "header" | "add" | "del" | "ctx" | "meta" | "note"
     text: str
     number: int | None  # changed-line number
@@ -47,8 +45,8 @@ class _Entry:
     section: str  # text after the closing @@ of the git hunk this line is in
 
 
-def _entries(file: FileDiff) -> list[_Entry]:
-    out: list[_Entry] = []
+def entries(file: FileDiff) -> list[Entry]:
+    out: list[Entry] = []
     old = new = number = 0
     section = ""
     for line in file.lines:
@@ -57,71 +55,25 @@ def _entries(file: FileDiff) -> list[_Entry]:
             m = _HEADER.match(line)
             if m:
                 old, new, section = int(m[1]), int(m[2]), m[3].strip()
-            out.append(_Entry("header", line, None, None, None, section))
+            out.append(Entry("header", line, None, None, None, section))
         elif head == "+":
             number += 1
-            out.append(_Entry("add", body, number, None, new, section))
+            out.append(Entry("add", body, number, None, new, section))
             new += 1
         elif head == "-":
             number += 1
-            out.append(_Entry("del", body, number, old, None, section))
+            out.append(Entry("del", body, number, old, None, section))
             old += 1
         elif head == "!":
             number += 1
-            out.append(_Entry("note", body, number, None, None, section))
+            out.append(Entry("note", body, number, None, None, section))
         elif head == "\\":
-            out.append(_Entry("meta", line, None, None, None, section))
+            out.append(Entry("meta", line, None, None, None, section))
         else:
-            out.append(_Entry("ctx", body, None, old, new, section))
+            out.append(Entry("ctx", body, None, old, new, section))
             old += 1
             new += 1
     return out
-
-
-def delta_rows(file: FileDiff, numbers: set[int] | list[int]) -> list[Row]:
-    """The rows to show for the changed lines `numbers` of `file`."""
-    wanted = set(numbers)
-    entries = _entries(file)
-    chosen = [i for i, e in enumerate(entries) if e.number in wanted]
-    visible: set[int] = set()
-    for i in chosen:
-        visible.add(i)
-        for step in (-1, 1):
-            j, used = i + step, 0
-            while 0 <= j < len(entries) and entries[j].kind != "header":
-                visible.add(j)
-                if entries[j].kind != "meta":
-                    used += 1
-                    if used >= CONTEXT:
-                        break
-                j += step
-
-    # `\ No newline at end of file` belongs to the line before it
-    visible |= {
-        i + 1 for i in visible if i + 1 < len(entries) and entries[i + 1].kind == "meta"
-    }
-
-    rows: list[Row] = []
-    prev = -2
-    for i in sorted(visible):
-        e = entries[i]
-        if i != prev + 1:  # a break: show where we are in the file
-            at_start = i == 0 or entries[i - 1].kind == "header"
-            if rows or e.section or not at_start:
-                rows.append(Row("gap", text=e.section))
-        prev = i
-        if e.kind == "meta":
-            rows.append(Row("ctx", text=e.text))
-        elif e.kind == "note":
-            rows.append(Row("note", text=e.text))
-        elif e.kind == "ctx":
-            rows.append(Row("ctx", " ", e.text, e.old, e.new))
-        else:
-            kind = "sel" if e.number in wanted else "other"
-            sign = "+" if e.kind == "add" else "-"
-            rows.append(Row(kind, sign, e.text, e.old, e.new))
-    _emphasise(rows)
-    return rows
 
 
 _TOKEN = re.compile(r"\w+|\s+|[^\w\s]")
@@ -173,20 +125,58 @@ def _pair(old: Row, new: Row) -> None:
             new.emph.append((pos_b[b0], pos_b[b1]))
 
 
-def kind_of(file: FileDiff, numbers: set[int] | list[int]) -> str:
-    """How to show a delta: `added` (only new lines: a section), `removed` (only
-    deleted lines) or `edit` (a mix: a small change to existing code)."""
-    wanted = set(numbers)
-    signs = {
-        line[0]
-        for n, line in enumerate((x for x in file.lines if is_changed(x)), 1)
-        if n in wanted
-    }
-    if signs == {"+"}:
-        return "added"
-    if signs == {"-"}:
-        return "removed"
-    return "edit"
+def _lines(text: str) -> list[str]:
+    return text.split("\n") if text else []
+
+
+def count(side: Side | None) -> int:
+    return len(_lines(side.text)) if side else 0
+
+
+def change_rows(before: Side, after: Side) -> list[Row]:
+    """A small diff of what the agent said the code was and now is: shared lines
+    as context, the rest removed/added, with differing words marked."""
+    a, b = _lines(before.text), _lines(after.text)
+    rows: list[Row] = []
+    for op, a0, a1, b0, b1 in SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            for k in range(a1 - a0):
+                rows.append(
+                    Row(
+                        "ctx",
+                        " ",
+                        a[a0 + k],
+                        before.start + a0 + k,
+                        after.start + b0 + k,
+                    )
+                )
+            continue
+        for k in range(a0, a1):
+            rows.append(Row("sel", "-", a[k], before.start + k, None))
+        for k in range(b0, b1):
+            rows.append(Row("sel", "+", b[k], None, after.start + k))
+    _emphasise(rows)
+    return rows
+
+
+def stats(delta: Delta) -> tuple[int, int]:
+    """(added, removed) lines the delta shows."""
+    if delta.kind == "insert":
+        return count(delta.after), 0
+    if delta.kind == "delete":
+        return 0, count(delta.before)
+    if delta.kind == "change":
+        rows = change_rows(delta.before, delta.after)
+        return (
+            sum(1 for r in rows if r.sign == "+"),
+            sum(1 for r in rows if r.sign == "-"),
+        )
+    if delta.kind == "raw":
+        return (
+            sum(1 for x in delta.diff if x[:1] == "+"),
+            sum(1 for x in delta.diff if x[:1] == "-"),
+        )
+    return 0, 0
 
 
 @dataclass
@@ -202,21 +192,18 @@ def _indent(text: str) -> int:
     return len(text) - len(text.lstrip())
 
 
-def move_view(
-    file: FileDiff, numbers: list[int], dest: FileDiff, to_numbers: list[int]
-) -> MoveView:
-    """Both ends of a move, with each line marked as matched (it reappears on
+def move_view(delta: Delta) -> MoveView:
+    """Both ends of a declared move, each line marked as matched (it reappears on
     the other side ignoring indentation) or not (edited, dropped or new)."""
-
-    def side(f: FileDiff, nums: list[int], sign: str) -> list[Row]:
-        wanted = set(nums)
-        out = []
-        for e in _entries(f):
-            if e.number in wanted and e.kind in ("add", "del"):
-                out.append(Row("sel", sign, e.text, e.old, e.new))
-        return out
-
-    removed, added = side(file, numbers, "-"), side(dest, to_numbers, "+")
+    assert delta.before and delta.after
+    removed = [
+        Row("sel", "-", t, delta.before.start + k)
+        for k, t in enumerate(_lines(delta.before.text))
+    ]
+    added = [
+        Row("sel", "+", t, None, delta.after.start + k)
+        for k, t in enumerate(_lines(delta.after.text))
+    ]
     sm = SequenceMatcher(
         None,
         [r.text.strip() for r in removed],
@@ -238,33 +225,78 @@ def move_view(
     return MoveView(removed, added, same, len(removed), reindent or None)
 
 
-def new_range(rows: list[Row]) -> tuple[int, int] | None:
-    """First and last line, in the file after the commit, that the delta touches.
-    None when it only removes lines."""
-    nums = [r.new for r in rows if r.kind == "sel" and r.sign == "+" and r.new]
-    return (min(nums), max(nums)) if nums else None
-
-
-def plain(rows: list[Row]) -> list[str]:
-    """The delta as text lines (its own and context only, in diff style), for
-    machine readers."""
-    out = []
-    for r in rows:
-        if r.kind == "gap":
-            out.append(f"... {r.text}".rstrip())
-        elif r.kind in ("sel", "ctx"):
-            out.append(f"{r.sign}{r.text}")
-        elif r.kind == "note":
-            out.append(f"! {r.text}")
+def plain(delta: Delta) -> list[str]:
+    """The delta as diff-style text lines, for machine readers."""
+    if delta.kind == "raw":
+        return list(delta.diff)
+    out = [f"-{t}" for t in _lines(delta.before.text)] if delta.before else []
+    out += [f"+{t}" for t in _lines(delta.after.text)] if delta.after else []
     return out
 
 
-def stats(file: FileDiff, numbers: set[int] | list[int]) -> tuple[int, int]:
-    """(added, removed) among the delta's changed lines."""
+# -- the raw commit ------------------------------------------------------
+
+
+def side_text(file: FileDiff, which: str, numbers: list[int]) -> str | None:
+    """The code of `file` at lines `numbers` as the diff shows it (`which` is
+    "old" for the file before the commit, "new" for after). None when the diff
+    does not include all of them (only the agent can supply code the commit's
+    diff has no view of)."""
     wanted = set(numbers)
-    changed = [line for line in file.lines if is_changed(line)]
-    picked = [line for n, line in enumerate(changed, 1) if n in wanted]
-    return (
-        sum(1 for line in picked if line[0] == "+"),
-        sum(1 for line in picked if line[0] == "-"),
-    )
+    found: dict[int, str] = {}
+    for e in entries(file):
+        n = e.old if which == "old" else e.new
+        if n in wanted and e.kind in ("ctx", "add", "del"):
+            found[n] = e.text
+    if wanted - set(found):
+        return None
+    return "\n".join(found[n] for n in sorted(found))
+
+
+@dataclass
+class Gap:
+    """Changed lines of a commit that no delta accounts for."""
+
+    commit: str
+    path: str
+    old: list[int] = field(default_factory=list)  # removed lines, pre-commit numbers
+    new: list[int] = field(default_factory=list)  # added lines, post-commit numbers
+
+
+def uncovered(changes: list[Change], sources: dict[str, Source]) -> list[Gap]:
+    """Changed lines of the commits `changes` are cut from that no delta covers.
+    Advisory: the agent's declaration is the truth, this only notices what it
+    left unsaid."""
+    old: dict[tuple[str, str], set[int]] = {}
+    new: dict[tuple[str, str], set[int]] = {}
+    raw: set[tuple[str, str]] = set()
+    commits: set[str] = set()
+    for c in changes:
+        for d in c.deltas:
+            commits.add(d.commit)
+            if d.kind == "raw":
+                raw.add((d.commit, d.path))
+            for side, into in ((d.before, old), (d.after, new)):
+                if side and side.lines:
+                    try:
+                        nums = parse_lines(side.lines)
+                    except ValueError:
+                        continue
+                    into.setdefault((d.commit, side.path), set()).update(nums)
+    gaps = []
+    for commit in sorted(commits & set(sources)):
+        for f in sources[commit].files:
+            key = (commit, f.path)
+            if key in raw:
+                continue
+            gap = Gap(commit, f.path)
+            for e in entries(f):
+                if e.kind == "del" and e.old not in old.get(key, ()):
+                    gap.old.append(e.old)
+                elif e.kind == "add" and e.new not in new.get(key, ()):
+                    gap.new.append(e.new)
+                elif e.kind == "note" and key not in old and key not in new:
+                    gap.new.append(0)
+            if gap.old or gap.new:
+                gaps.append(gap)
+    return gaps

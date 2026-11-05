@@ -4,20 +4,23 @@ import subprocess
 import pytest
 
 from overseer import cli
-from overseer.model import FileDiff, Source
+from overseer.deltaview import uncovered
+from overseer.model import FileDiff, Note, Source
 from overseer.planning import PlanError, apply_plan, default_change
 from overseer.store import Store
 
 
-def dl(commit, path, lines=None, **extra):
-    """A plan delta; omitting `lines` means the whole file."""
-    out = {"commit": commit, "path": path, **extra}
-    if lines is not None:
-        out["lines"] = lines
-    return out
+def ins(commit, path, lines="1", **extra):
+    """A plan delta declaring an insert; the code is copied from the diff."""
+    return {
+        "kind": "insert",
+        "commit": commit,
+        "after": {"path": path, "lines": lines},
+        **extra,
+    }
 
 
-ALL = [dl("aaa", f"aaa{i}.py") for i in range(3)]  # every file of commit aaa
+ALL = [ins("aaa", f"aaa{i}.py") for i in range(3)]
 
 
 @pytest.fixture
@@ -32,14 +35,15 @@ def store(tmp_path):
     return s
 
 
-def test_default_change_is_one_delta_per_file(store):
-    (c, _) = [c for c in store.changes()]
+def test_default_change_is_one_raw_delta_per_file(store):
+    (c, _) = store.changes()
     assert [d.id for d in c.deltas] == [
-        "aaa:aaa0.py#1",
-        "aaa:aaa1.py#1",
-        "aaa:aaa2.py#1",
+        "aaa:raw@aaa0.py",
+        "aaa:raw@aaa1.py",
+        "aaa:raw@aaa2.py",
     ]
-    assert not c.planned
+    assert {d.kind for d in c.deltas} == {"raw"} and not c.planned
+    assert c.deltas[0].diff == ["@@ -1 +1 @@", "+0"]
 
 
 def test_plan_replaces_default_and_preserves_order(store):
@@ -48,14 +52,10 @@ def test_plan_replaces_default_and_preserves_order(store):
             {
                 "risk": "green",
                 "title": "second half",
-                "deltas": [dl("aaa", "aaa2.py")],
+                "deltas": [ALL[2]],
                 "answers": {"why": "w"},
             },
-            {
-                "risk": "green",
-                "title": "first half",
-                "deltas": [dl("aaa", "aaa0.py"), dl("aaa", "aaa1.py")],
-            },
+            {"risk": "green", "title": "first half", "deltas": ALL[:2]},
         ]
     }
     new = apply_plan(store, plan)
@@ -67,161 +67,140 @@ def test_plan_replaces_default_and_preserves_order(store):
 
 
 def test_change_may_span_sources(store):
-    both = [dl(s, f"{s}{i}.py") for s in ("aaa", "bbb") for i in range(3)]
+    both = [ins(s, f"{s}{i}.py") for s in ("aaa", "bbb") for i in range(3)]
     apply_plan(store, {"changes": [{"title": "both", "risk": "green", "deltas": both}]})
     assert [c.id for c in store.changes()] == ["aaa-01"]
-    # replanning only one of the sources now would orphan the other's lines
+    # replanning only one of the sources now would orphan the other's deltas
+    plan = {"changes": [{"risk": "green", "title": "t", "deltas": ALL}]}
     with pytest.raises(PlanError, match="also covers bbb"):
-        apply_plan(
-            store,
-            {
-                "changes": [
-                    {
-                        "risk": "green",
-                        "title": "t",
-                        "deltas": [dl("aaa", f"aaa{i}.py") for i in range(3)],
-                    }
-                ]
-            },
-        )
+        apply_plan(store, plan)
 
 
-@pytest.fixture
-def big(tmp_path):
-    """One file with ten changed lines (-0 +0 ... in two git hunks) and one small."""
-    s = Store(tmp_path)
-    lines = ["@@ -1,5 +1,5 @@ def f"]
-    lines += [f"{'-' if i % 2 else '+'}l{i}" for i in range(5)]
-    lines += ["@@ -50,5 +50,5 @@ def g"]
-    lines += [f"{'-' if i % 2 else '+'}m{i}" for i in range(5)]
-    src = Source("ccc", "m", [FileDiff("f.py", lines), FileDiff("g.py", ["+g"])], 1)
-    s.save_source(src)
-    s.save_change(default_change(src))
-    return s
-
-
-def test_deltas_cut_lines_regardless_of_git_hunks(big):
-    # one delta crosses git's two hunks; another is a single line inside one
-    apply_plan(
-        big,
+def test_the_agent_declares_each_kind(store):
+    deltas = [
+        ins("aaa", "aaa0.py", summary="adds it"),
         {
-            "changes": [
-                {
-                    "title": "edges",
-                    "risk": "green",
-                    "deltas": [
-                        dl("ccc", "f.py", "5-6", summary=" joins the hunks "),
-                        dl("ccc", "g.py"),
-                    ],
-                },
-                {
-                    "title": "rest",
-                    "risk": "green",
-                    "deltas": [dl("ccc", "f.py", "1-4"), dl("ccc", "f.py", "7,8-10")],
-                },
-            ]
+            "kind": "delete",
+            "commit": "aaa",
+            "before": {"path": "aaa1.py", "lines": "7-8", "text": "old\nlines"},
         },
+        {
+            "kind": "change",
+            "commit": "aaa",
+            "before": {"path": "aaa2.py", "lines": "3", "text": "if a:"},
+            "after": {"path": "aaa2.py", "lines": "3", "text": "if a and b:"},
+        },
+        {
+            "kind": "move",
+            "commit": "aaa",
+            "before": {
+                "path": "aaa1.py",
+                "symbol": "f",
+                "lines": "1-2",
+                "text": "p\nq",
+            },
+            "after": {
+                "path": "aaa2.py",
+                "symbol": "g",
+                "lines": "9-10",
+                "text": "p\nq",
+            },
+        },
+    ]
+    (c,) = apply_plan(
+        store, {"changes": [{"title": "t", "risk": "green", "deltas": deltas}]}
     )
-    edges, rest = big.changes()
-    assert [d.id for d in edges.deltas] == ["ccc:f.py#5-6", "ccc:g.py#1"]
-    assert edges.deltas[0].summary == "joins the hunks"
-    assert [d.lines for d in rest.deltas] == ["1-4", "7-10"]  # canonical form
+    ins_, dele, chg, mov = store.load_change(c.id).deltas
+    assert [d.kind for d in (ins_, dele, chg, mov)] == [
+        "insert",
+        "delete",
+        "change",
+        "move",
+    ]
+    assert ins_.after.text == "0"  # copied from the commit's diff
+    assert (dele.before.text, dele.after) == ("old\nlines", None)
+    assert (chg.before.text, chg.after.text) == ("if a:", "if a and b:")
+    assert mov.before.symbol == "f" and mov.after.where == "aaa2.py:9-10"
+    assert mov.id == "aaa:move@aaa1.py:1-2>aaa2.py:9-10"
+    assert ins_.id == "aaa:insert@aaa0.py:1"
 
 
 @pytest.mark.parametrize(
-    "deltas, message",
+    "delta, message",
     [
+        ({"kind": "rewrite", "commit": "aaa"}, "kind must be one of"),
+        ({"kind": "raw", "commit": "aaa"}, "kind must be one of"),
+        (ins("zzz", "x.py"), "unknown commit 'zzz'"),
+        ({**ins("aaa", "aaa0.py"), "before": {"path": "x", "lines": "1"}}, "remove"),
+        ({"kind": "delete", "commit": "aaa"}, "a delete needs before"),
         (
-            [dl("ccc", "f.py", "1-9"), dl("ccc", "g.py")],
-            "unassigned changed lines in ccc f.py: 10",
+            {"kind": "change", "commit": "aaa", "before": {"path": "a", "lines": "1"}},
+            "a change needs before and after",
         ),
-        ([dl("ccc", "f.py", "1-10")], "unassigned changed lines in ccc g.py: 1"),
+        (ins("aaa", "aaa0.py", "x"), "lines must be a line or range"),
+        (ins("aaa", "aaa0.py", "5-2"), "lines must be a line or range"),
+        (ins("aaa", "aaa0.py", "40"), "no text given and the commit's diff"),
+        (ins("aaa", "nope.py"), "no text given and the commit's diff"),
         (
-            [dl("ccc", "f.py", "1-6"), dl("ccc", "f.py", "6-10"), dl("ccc", "g.py")],
-            r"lines 6 already in changes\[1\].deltas\[1\]",
+            {
+                "kind": "change",
+                "commit": "aaa",
+                "before": {"path": "a.py", "lines": "1", "text": "x"},
+                "after": {"path": "b.py", "lines": "1", "text": "y"},
+            },
+            "use kind move",
         ),
-        ([dl("ccc", "f.py", "1-11"), dl("ccc", "g.py")], "out of range"),
-        ([dl("ccc", "f.py", "0-3"), dl("ccc", "g.py")], "out of range"),
-        ([dl("ccc", "f.py", "x"), dl("ccc", "g.py")], "bad line spec"),
-        ([dl("ccc", "nope.py"), dl("ccc", "g.py")], "has no changed file"),
-        ([dl("zzz", "f.py")], "unknown commit"),
+        (ins("aaa", "aaa0.py", summary=" "), "summary needs text"),
+        ("insert", "must be an object"),
     ],
 )
-def test_line_level_validation(big, deltas, message):
-    before = [c.to_dict() for c in big.changes()]
+def test_invalid_deltas_write_nothing(store, delta, message):
+    before = [c.to_dict() for c in store.changes()]
+    plan = {"changes": [{"title": "t", "risk": "green", "deltas": [delta]}]}
     with pytest.raises(PlanError, match=message):
-        apply_plan(
-            big, {"changes": [{"title": "t", "risk": "green", "deltas": deltas}]}
-        )
-    assert [c.to_dict() for c in big.changes()] == before  # nothing written
+        apply_plan(store, plan)
+    assert [c.to_dict() for c in store.changes()] == before
+
+
+def test_the_same_delta_twice_is_rejected(store):
+    plan = {"changes": [{"title": "t", "risk": "green", "deltas": [ALL[0], ALL[0]]}]}
+    with pytest.raises(PlanError, match="same as changes"):
+        apply_plan(store, plan)
+
+
+def test_text_may_be_given_instead_of_copied(store):
+    d = ins("aaa", "aaa0.py", "40-41")
+    d["after"]["text"] = "written\nby the agent"
+    (c,) = apply_plan(
+        store, {"changes": [{"title": "t", "risk": "green", "deltas": [d]}]}
+    )
+    assert store.load_change(c.id).deltas[0].after.text == "written\nby the agent"
 
 
 @pytest.mark.parametrize(
     "plan, message",
     [
+        ("nope", "plan must be an object"),
+        ({"changes": []}, "is empty"),
+        ({"changes": [{"risk": "green", "deltas": ALL}]}, "missing title"),
+        ({"changes": [{"title": "t", "risk": "green", "deltas": []}]}, "non-empty"),
         (
-            {
-                "changes": [
-                    {"risk": "green", "title": "t", "deltas": [dl("aaa", "aaa0.py")]}
-                ]
-            },
-            "unassigned changed lines in aaa aaa1.py: 1",
+            {"changes": [{"title": "t", "risk": "green", "deltas": ALL, "answers": 3}]},
+            "answers must be an object",
         ),
         (
             {
                 "changes": [
                     {
-                        "risk": "green",
                         "title": "t",
-                        "deltas": [dl("aaa", f"aaa{i}.py") for i in (0, 0, 1, 2)],
+                        "risk": "green",
+                        "deltas": ALL,
+                        "answers": {"x": "y"},
                     }
                 ]
             },
-            "already in",
+            "unknown question 'x'",
         ),
-        (
-            {
-                "changes": [
-                    {"risk": "green", "title": "", "deltas": [dl("aaa", "aaa0.py")]}
-                ]
-            },
-            "missing title",
-        ),
-        (
-            {"changes": [{"risk": "green", "title": "t", "deltas": []}]},
-            "non-empty deltas",
-        ),
-        (
-            {"changes": [{"risk": "green", "title": "t", "deltas": ["aaa:aaa0.py#1"]}]},
-            "must be an object with commit, path",
-        ),
-        (
-            {
-                "changes": [
-                    {
-                        "risk": "green",
-                        "title": "t",
-                        "deltas": [dl("aaa", "aaa0.py", summary=" ")],
-                    }
-                ]
-            },
-            "summary needs text",
-        ),
-        (
-            {
-                "changes": [
-                    {
-                        "risk": "green",
-                        "title": "t",
-                        "deltas": [dl("aaa", "aaa0.py")],
-                        "answers": {"bogus": "x"},
-                    }
-                ]
-            },
-            "unknown question",
-        ),
-        ({"changes": []}, "empty"),
-        ([], "plan must be"),
     ],
 )
 def test_invalid_plans_write_nothing(store, plan, message):
@@ -231,6 +210,22 @@ def test_invalid_plans_write_nothing(store, plan, message):
     assert [c.to_dict() for c in store.changes()] == before
 
 
+def test_unmentioned_changed_lines_are_reported_not_rejected(store):
+    # the agent covers only two of aaa's three files: accepted, but the gap shows
+    plan = {"changes": [{"title": "t", "risk": "green", "deltas": ALL[:2]}]}
+    new = apply_plan(store, plan)
+    (gap,) = uncovered(new, store.sources())
+    assert (gap.commit, gap.path, gap.new, gap.old) == ("aaa", "aaa2.py", [1], [])
+    full = apply_plan(
+        store, {"changes": [{"title": "t", "risk": "green", "deltas": ALL}]}
+    )
+    assert uncovered(full, store.sources()) == []
+
+
+def test_a_raw_default_has_no_gaps(store):
+    assert uncovered(store.changes()[:1], store.sources()) == []
+
+
 def git(cwd, *args):
     subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
@@ -238,56 +233,6 @@ def git(cwd, *args):
         check=True,
         capture_output=True,
     )
-
-
-def test_end_to_end_ingest_show_plan(tmp_path, monkeypatch, capsys):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    git(repo, "init", "-q")
-    (repo / "f.txt").write_text("".join(f"{i}\n" for i in range(30)))
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "base")
-    lines = (repo / "f.txt").read_text().splitlines()
-    lines[1], lines[25] = "A", "B"
-    (repo / "f.txt").write_text("\n".join(lines) + "\n")
-    git(repo, "commit", "-qam", "do two things")
-    monkeypatch.chdir(repo)
-    monkeypatch.setenv("OVERSEER_DIR", str(tmp_path / "ov"))
-
-    assert cli.main(["ingest", "HEAD", "--reviewset", "default"]) == 0
-    out = capsys.readouterr().out
-    sha = out.split()[0]
-    assert "1 files, 4 changed lines" in out
-    assert cli.main(["ingest", "HEAD", "--reviewset", "default"]) == 0  # idempotent
-    assert "already ingested" in capsys.readouterr().out
-
-    assert cli.main(["show", sha, "--reviewset", "default"]) == 0
-    shown = capsys.readouterr().out
-    assert "== f.txt  (changed lines 1-4)" in shown
-    assert "   1 -1" in shown and "   2 +A" in shown and "   4 +B" in shown
-
-    assert cli.main(["show", sha, "--json", "--reviewset", "default"]) == 0
-    (f,) = json.loads(capsys.readouterr().out)["files"]
-    assert f["path"] == "f.txt" and f["changed"] == 4
-    assert [x["n"] for x in f["lines"] if x["n"]] == [1, 2, 3, 4]
-
-    # git sees two hunks; the plan cuts by changed line and may recombine
-    plan = {
-        "changes": [
-            {"risk": "green", "title": "tweak A", "deltas": [dl(sha, "f.txt", "1-2")]},
-            {"risk": "green", "title": "tweak B", "deltas": [dl(sha, "f.txt", "3-4")]},
-        ]
-    }
-    planfile = tmp_path / "plan.json"
-    planfile.write_text(json.dumps(plan))
-    assert cli.main(["plan", str(planfile), "--reviewset", "default"]) == 0
-    capsys.readouterr()
-    assert cli.main(["list", "--unplanned", "--reviewset", "default"]) == 0
-    assert json.loads(capsys.readouterr().out) == []
-
-    assert cli.main(["list", "--reviewset", "default"]) == 0
-    first, _ = json.loads(capsys.readouterr().out)
-    assert first["deltas"][0]["id"] == f"{sha}:f.txt#1-2"  # ids are in the JSON
 
 
 @pytest.mark.parametrize(
@@ -329,7 +274,7 @@ def test_risk_is_stored(store):
 
 
 def test_plan_stores_links(store):
-    deltas = [dl("aaa", "aaa0.py"), dl("aaa", "aaa1.py"), dl("aaa", "aaa2.py")]
+    deltas = [dict(d) for d in ALL]
     deltas[1]["related"] = [{"path": "t.py"}]
     (c,) = apply_plan(
         store,
@@ -365,113 +310,95 @@ def test_invalid_links_rejected(store, extra, message):
 
 
 def test_delta_summaries_stored_and_recordable(store, monkeypatch, tmp_path):
-    deltas = [dl("aaa", "aaa0.py", summary=" does x "), *ALL[1:]]
+    deltas = [ins("aaa", "aaa0.py", summary=" does x "), *ALL[1:]]
     (change,) = apply_plan(
         store, {"changes": [{"risk": "green", "title": "t", "deltas": deltas}]}
     )
     assert store.load_change(change.id).deltas[0].summary == "does x"
     monkeypatch.setenv("OVERSEER_DIR", str(tmp_path))
     args = ["record", change.id, "--reviewset", "default"]
-    assert cli.main([*args, "--delta", "aaa:aaa2.py#1", "--summary", "adds y"]) == 0
-    assert store.load_change(change.id).deltas[2].summary == "adds y"
-    assert cli.main([*args, "--delta", "bbb:bbb0.py#1", "--summary", "z"]) != 0
-    assert cli.main([*args, "--delta", "aaa:aaa0.py#1"]) != 0  # summary missing
+    assert cli.main([*args, "--delta", "aaa:insert@aaa2.py:1", "--summary", "y"]) == 0
+    assert store.load_change(change.id).deltas[2].summary == "y"
+    assert cli.main([*args, "--delta", "bbb:insert@bbb0.py:1", "--summary", "z"]) != 0
+    assert cli.main([*args, "--delta", "aaa:insert@aaa0.py:1"]) != 0  # no summary
 
 
-@pytest.fixture
-def moved(tmp_path):
-    """a.py loses a 3-line block; b.py gains it (re-indented) under a new `if`."""
-    s = Store(tmp_path)
-    block = ["y = compute(x)", "z = other(y)", "return z + 1"]
-    a = FileDiff(
-        "a.py",
-        ["@@ -1,5 +1,2 @@ def big():", " x = 1", *(f"-{b}" for b in block), " end"],
-    )
-    b = FileDiff(
-        "b.py",
-        [
-            "@@ -0,0 +1,5 @@",
-            "+def extracted(x):",
-            "+    if x:",
-            *(f"+        {t}" for t in block),
-        ],
-    )
-    src = Source("mmm", "extract", [a, b], 1)
-    s.save_source(src)
-    s.save_change(default_change(src))
-    return s
-
-
-def test_a_move_is_one_delta_with_two_ends(moved):
-    (c,) = apply_plan(
-        moved,
-        {
-            "changes": [
-                {
-                    "title": "Extract",
-                    "risk": "green",
-                    "deltas": [
-                        dl(
-                            "mmm",
-                            "a.py",
-                            "1-3",
-                            moved_to={"path": "b.py", "lines": "3-5"},
-                        ),
-                        dl("mmm", "b.py", "1-2"),  # what else is new there
-                    ],
-                }
-            ]
-        },
-    )
-    move, rest = c.deltas
-    assert move.moved and move.id == "mmm:a.py#1-3>b.py#3-5"
-    assert rest.id == "mmm:b.py#1-2"
-    assert moved.load_change(c.id).deltas[0].to_path == "b.py"
-
-
-@pytest.mark.parametrize(
-    "delta, rest, message",
-    [
-        (
-            dl("mmm", "a.py", "1-2", moved_to={"path": "a.py", "lines": "3"}),
-            [],
-            "must all be added",
-        ),
-        (
-            dl("mmm", "b.py", "1-2", moved_to={"path": "a.py", "lines": "1-3"}),
-            [dl("mmm", "b.py", "3-5")],
-            "must all be removed",
-        ),
-        (
-            dl("mmm", "a.py", "1-3", moved_to={"path": "zzz.py"}),
-            [],
-            "no changed file 'zzz.py'",
-        ),
-        (
-            dl("mmm", "a.py", "1-3", moved_to={"path": "b.py", "lines": "3-5"}),
-            [dl("mmm", "b.py", "3-4")],
-            "already in",
-        ),
-        (
-            dl("mmm", "a.py", "1-3", moved_to={"path": "b.py", "lines": "3-5"}),
-            [],
-            "unassigned changed lines in mmm b.py: 1-2",
-        ),
-        (dl("mmm", "a.py", "1-3", moved_to={"lines": "3-5"}), [], r"moved_to: must be"),
-    ],
-)
-def test_move_validation(moved, delta, rest, message):
-    before = [c.to_dict() for c in moved.changes()]
-    plan = {"changes": [{"title": "t", "risk": "green", "deltas": [delta, *rest]}]}
-    with pytest.raises(PlanError, match=message):
-        apply_plan(moved, plan)
-    assert [c.to_dict() for c in moved.changes()] == before
-
-
-def test_end_to_end_move_in_a_real_commit(tmp_path, monkeypatch, capsys):
+def _repo(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("OVERSEER_DIR", str(tmp_path / "ov"))
+    return repo
+
+
+def test_end_to_end_change_and_notes(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path, monkeypatch)
+    (repo / "f.txt").write_text("".join(f"{i}\n" for i in range(30)))
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    lines = (repo / "f.txt").read_text().splitlines()
+    lines[1], lines[25] = "A", "B"
+    (repo / "f.txt").write_text("\n".join(lines) + "\n")
+    git(repo, "commit", "-qam", "do two things")
+
+    assert cli.main(["ingest", "HEAD", "--reviewset", "default"]) == 0
+    out = capsys.readouterr().out
+    sha = out.split()[0]
+    assert "1 files, 4 changed lines" in out
+    assert cli.main(["ingest", "HEAD", "--reviewset", "default"]) == 0  # idempotent
+    assert "already ingested" in capsys.readouterr().out
+
+    assert cli.main(["show", sha, "--reviewset", "default"]) == 0
+    shown = capsys.readouterr().out
+    assert "    2       -1" in shown and "      2 +A" in shown  # old / new numbers
+
+    assert cli.main(["show", sha, "--json", "--reviewset", "default"]) == 0
+    (f,) = json.loads(capsys.readouterr().out)["files"]
+    assert {"kind": "add", "old": None, "new": 2, "text": "A"} in f["lines"]
+
+    plan = {
+        "changes": [
+            {
+                "risk": "green",
+                "title": "tweak A",
+                "deltas": [
+                    {
+                        "kind": "change",
+                        "commit": sha,
+                        "before": {"path": "f.txt", "lines": "2"},  # text from diff
+                        "after": {"path": "f.txt", "lines": "2"},
+                        "summary": "rename the second line",
+                    }
+                ],
+            }
+        ]
+    }
+    planfile = tmp_path / "plan.json"
+    planfile.write_text(json.dumps(plan))
+    assert cli.main(["plan", str(planfile), "--reviewset", "default"]) == 0
+    captured = capsys.readouterr()
+    # the agent said nothing about the B edit: reported as a warning, not an error
+    assert "warning: no delta mentions" in captured.err and "26" in captured.err
+    assert cli.main(["list", "--unplanned", "--reviewset", "default"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+    assert cli.main(["list", "--reviewset", "default"]) == 0
+    (c,) = json.loads(capsys.readouterr().out)
+    (d,) = c["deltas"]
+    assert d["id"] == f"{sha}:change@f.txt:2>f.txt:2"
+    assert (d["before"]["text"], d["after"]["text"]) == ("1", "A")
+
+    Store(reviewset="default").save_note(Note("n1", "delta", d["id"], "why?"))
+    assert cli.main(["notes", "--reviewset", "default"]) == 0
+    (note,) = json.loads(capsys.readouterr().out)
+    ctx = note["context"]
+    assert ctx["kind"] == "change" and ctx["diff"] == ["-1", "+A"]
+    assert ctx["after"]["lines"] == "2" and ctx["summary"] == "rename the second line"
+
+
+def test_end_to_end_move_in_a_real_commit(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path, monkeypatch)
     body = "".join(f"    step_{i} = prepare_something_{i}(inputs)\n" for i in range(5))
     (repo / "a.py").write_text(f"def big(inputs):\n{body}    return inputs\n")
     (repo / "b.py").write_text("# helpers\n")
@@ -483,32 +410,43 @@ def test_end_to_end_move_in_a_real_commit(tmp_path, monkeypatch, capsys):
         f"# helpers\ndef helper(inputs):\n    if inputs:\n{nested}"
     )
     git(repo, "commit", "-qam", "extract helper")
-    monkeypatch.chdir(repo)
-    monkeypatch.setenv("OVERSEER_DIR", str(tmp_path / "ov"))
 
     assert cli.main(["ingest", "HEAD", "--reviewset", "r"]) == 0
     sha = capsys.readouterr().out.split()[0]
     assert cli.main(["show", sha, "--reviewset", "r"]) == 0
     shown = capsys.readouterr().out
-    assert "Possible moves" in shown and "a.py lines 1-5 -> b.py lines 3-7" in shown
+    assert "Possible moves" in shown and "a.py lines 2-6 -> b.py lines 4-8" in shown
     assert cli.main(["show", sha, "--json", "--reviewset", "r"]) == 0
     (mv,) = json.loads(capsys.readouterr().out)["possible_moves"]
-    assert mv == {
-        "path": "a.py",
-        "lines": "1-5",
-        "moved_to": {"path": "b.py", "lines": "3-7"},
-    }
+    assert mv["before"] == {"path": "a.py", "lines": "2-6"}
+    assert mv["after"] == {"path": "b.py", "lines": "4-8"}
 
-    # the block moves; the call that replaces it, and the new `if`, are their own deltas
+    # the agent declares the move, and says what else happened around it
     plan = {
         "changes": [
             {
                 "title": "Extract helper",
                 "risk": "green",
                 "deltas": [
-                    dl(sha, "a.py", "1-5", moved_to=mv["moved_to"]),
-                    dl(sha, "b.py", "1-2", summary="the new function and its guard"),
-                    dl(sha, "a.py", "6-7", summary="call the helper"),
+                    {
+                        "kind": "move",
+                        "commit": sha,
+                        "before": mv["before"],
+                        "after": {**mv["after"], "symbol": "helper"},
+                    },
+                    {
+                        "kind": "insert",
+                        "commit": sha,
+                        "after": {"path": "b.py", "lines": "2-3", "symbol": "helper"},
+                        "summary": "the new function and its guard",
+                    },
+                    {
+                        "kind": "change",
+                        "commit": sha,
+                        "before": {"path": "a.py", "lines": "7"},
+                        "after": {"path": "a.py", "lines": "2"},
+                        "summary": "call the helper",
+                    },
                 ],
             }
         ]
@@ -516,19 +454,15 @@ def test_end_to_end_move_in_a_real_commit(tmp_path, monkeypatch, capsys):
     planfile = tmp_path / "plan.json"
     planfile.write_text(json.dumps(plan))
     assert cli.main(["plan", str(planfile), "--reviewset", "r"]) == 0
-    capsys.readouterr()
+    captured = capsys.readouterr()
+    # every changed line is declared, so nothing is reported
+    assert "warning" not in captured.err
 
-    from overseer.model import Note
-
-    store = Store(reviewset="r")
-    move_id = f"{sha}:a.py#1-5>b.py#3-7"
-    store.save_note(Note("n1", "delta", move_id, "why nested?"))
+    move_id = f"{sha}:move@a.py:2-6>b.py:4-8"
+    Store(reviewset="r").save_note(Note("n1", "delta", move_id, "why nested?"))
     assert cli.main(["notes", "--reviewset", "r"]) == 0
     (note,) = json.loads(capsys.readouterr().out)
     ctx = note["context"]
-    assert ctx["path"] == "a.py" and ctx["changed_lines"] == "1-5"
-    assert ctx["moved_to"]["path"] == "b.py" and ctx["moved_to"]["new_lines"] == [
-        4,
-        8,
-    ]  # file lines
-    assert any("step_0" in line for line in ctx["moved_to"]["diff"])
+    assert ctx["kind"] == "move"
+    assert ctx["before"]["path"] == "a.py" and ctx["after"]["symbol"] == "helper"
+    assert any("step_0" in line for line in ctx["diff"])

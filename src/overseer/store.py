@@ -28,10 +28,8 @@ from typing import NamedTuple
 from overseer.model import (
     Change,
     Delta,
-    FileDiff,
     Note,
     Source,
-    parse_lines,
 )
 
 DEFAULT_REVIEWSET = "default"
@@ -229,41 +227,12 @@ def _note_num(note_id: str) -> int:
 
 
 class Resolved(NamedTuple):
-    """A delta together with what it points at. `dest` is a move's destination
-    file (None for every other delta)."""
+    """A delta with the commit it was cut from (None if that commit is gone)."""
 
-    source: Source
-    file: FileDiff
+    source: Source | None
     delta: Delta
-    dest: FileDiff | None = None
-
-    @property
-    def numbers(self) -> list[int]:
-        return parse_lines(self.delta.lines, self.file.count)
-
-    @property
-    def to_numbers(self) -> list[int]:
-        if self.dest is None:
-            return []
-        return parse_lines(self.delta.to_lines, self.dest.count)
 
 
 def resolve_deltas(change: Change, sources: dict[str, Source]) -> list[Resolved]:
-    """The change's deltas in review order. Ones that no longer resolve (commit
-    re-ingested differently, file or lines gone) are skipped rather than
-    crashing the viewer."""
-    out = []
-    for d in change.deltas:
-        src = sources.get(d.commit)
-        file = src.file(d.path) if src else None
-        dest = src.file(d.to_path) if src and d.moved else None
-        if not (src and file) or (d.moved and dest is None):
-            continue
-        try:
-            parse_lines(d.lines, file.count)
-            if dest is not None:
-                parse_lines(d.to_lines, dest.count)
-        except ValueError:
-            continue
-        out.append(Resolved(src, file, d, dest))
-    return out
+    """The change's deltas in review order, each with its commit."""
+    return [Resolved(sources.get(d.commit), d) for d in change.deltas]

@@ -1,14 +1,15 @@
 import pytest
+from conftest import chg, dele, ins, mov  # noqa: F401
 
 from overseer import cli
-from overseer.model import Change, Delta, FileDiff, Source
+from overseer.model import Change, FileDiff, Source
 from overseer.store import Store
 from overseer.tui.app import OverseerApp
 
 
 def put(store, sid, title):
     store.save_source(Source(sid, title, [FileDiff("a.py", ["+x"])], seq=1))
-    store.save_change(Change(sid, title, [Delta(sid, "a.py", "1")]))
+    store.save_change(Change(sid, title, [ins(sid, "a.py")]))
 
 
 def test_reviewsets_are_isolated(tmp_path):

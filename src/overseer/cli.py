@@ -8,11 +8,11 @@ import sys
 import time
 
 from overseer import gitdiff
-from overseer.deltaview import delta_rows, new_range, plain
-from overseer.model import QUESTIONS, RISKS, Link, format_lines, is_changed
+from overseer.deltaview import entries, plain, uncovered
+from overseer.model import QUESTIONS, RISKS, Link, format_lines
 from overseer.moves import find_moves
 from overseer.planning import PlanError, apply_plan, default_change
-from overseer.store import Store, resolve_deltas, valid_reviewset_name
+from overseer.store import Store, valid_reviewset_name
 
 
 def _err(msg: str) -> int:
@@ -66,15 +66,18 @@ def _show(store: Store, args: argparse.Namespace) -> int:
     src = store.load_source(args.source)
     if not src:
         return _err(f"unknown commit {args.source!r} (ingest it first)")
+    moves = find_moves(src)
     if args.json:
-        files = []
-        for f in src.files:
-            n, lines = 0, []
-            for line in f.lines:
-                if is_changed(line):
-                    n += 1
-                lines.append({"n": n if is_changed(line) else None, "text": line})
-            files.append({"path": f.path, "changed": f.count, "lines": lines})
+        files = [
+            {
+                "path": f.path,
+                "lines": [
+                    {"kind": e.kind, "old": e.old, "new": e.new, "text": e.text}
+                    for e in entries(f)
+                ],
+            }
+            for f in src.files
+        ]
         json.dump(
             {
                 "id": src.id,
@@ -82,14 +85,11 @@ def _show(store: Store, args: argparse.Namespace) -> int:
                 "files": files,
                 "possible_moves": [
                     {
-                        "path": m.path,
-                        "lines": format_lines(m.lines),
-                        "moved_to": {
-                            "path": m.to_path,
-                            "lines": format_lines(m.to_lines),
-                        },
+                        "before": {"path": m.path, "lines": m.lines},
+                        "after": {"path": m.to_path, "lines": m.to_lines},
+                        "size": m.size,
                     }
-                    for m in find_moves(src)
+                    for m in moves
                 ],
             },
             sys.stdout,
@@ -99,29 +99,31 @@ def _show(store: Store, args: argparse.Namespace) -> int:
         return 0
     print(f"commit {src.id}\n\n{src.message}\n")
     print(
-        "Changed lines (+, -) are numbered per file; a plan's deltas pick them "
-        "by number.\n"
+        "Each line is prefixed with its line number before (old) and after (new) "
+        "the commit; a plan's deltas name code by file and those line numbers.\n"
     )
     for f in src.files:
-        print(f"== {f.path}  (changed lines 1-{f.count})")
-        n = 0
-        for line in f.lines:
-            if is_changed(line):
-                n += 1
-                print(f"{n:>4} {line}")
+        print(f"== {f.path}")
+        for e in entries(f):
+            if e.kind == "header":
+                print(f"      {e.text}")
+            elif e.kind == "meta":
+                print(f"      {e.text}")
             else:
-                print(f"     {line}")
+                sign = {"add": "+", "del": "-", "ctx": " ", "note": "!"}[e.kind]
+                old = "" if e.old is None else e.old
+                new = "" if e.new is None else e.new
+                print(f"{old:>5} {new:>5} {sign}{e.text}")
         print()
-    moves = find_moves(src)
     if moves:
         print(
             "Possible moves (removed lines that reappear, ignoring indentation). "
-            "If one is a real move, give its delta `moved_to` in the plan:"
+            "If one is a real move, declare it as a `move` delta in the plan:"
         )
         for m in moves:
             print(
-                f"  {m.path} lines {format_lines(m.lines)} -> "
-                f"{m.to_path} lines {format_lines(m.to_lines)}  ({m.size} lines)"
+                f"  {m.path} lines {m.lines} -> {m.to_path} lines {m.to_lines}"
+                f"  ({m.size} lines)"
             )
         print()
     return 0
@@ -142,6 +144,16 @@ def _plan(store: Store, args: argparse.Namespace) -> int:
         return 1
     for c in changes:
         print(f"{c.id} {c.title} ({len(c.deltas)} deltas)")
+    for g in uncovered(changes, store.sources()):
+        parts = []
+        if g.old:
+            parts.append(f"removed lines {format_lines(g.old)} (old file)")
+        if g.new:
+            parts.append(f"added lines {format_lines(g.new)} (new file)")
+        print(
+            f"warning: no delta mentions {', '.join(parts)} of {g.commit} {g.path}",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -208,7 +220,7 @@ def _list(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
-def _note_dict(note, changes, sources) -> dict:
+def _note_dict(note, changes) -> dict:
     """The note plus what it points at, so an agent need not re-derive context.
     Notes outlive re-planning, so a target may be gone: `stale` says so."""
     out = note.to_dict()
@@ -218,38 +230,27 @@ def _note_dict(note, changes, sources) -> dict:
         ctx = {"change_title": change.title} if change else {"stale": True}
     elif note.kind == "delta":
         owner = next((c for c in changes if note.ref in c.delta_ids), None)
-        if owner:
-            for r in resolve_deltas(owner, sources):
-                if r.delta.id == note.ref:
-                    rows = delta_rows(r.file, r.numbers)
-                    span = new_range(rows)
-                    ctx = {
-                        "change": owner.id,
-                        "change_title": owner.title,
-                        "commit": r.source.id,
-                        "path": r.delta.path,
-                        "changed_lines": r.delta.lines,
-                        "new_lines": list(span) if span else None,
-                        "diff": plain(rows),
-                    }
-                    if r.dest is not None:  # a move: say where it went too
-                        to_rows = delta_rows(r.dest, r.to_numbers)
-                        to_span = new_range(to_rows)
-                        ctx["moved_to"] = {
-                            "path": r.delta.to_path,
-                            "changed_lines": r.delta.to_lines,
-                            "new_lines": list(to_span) if to_span else None,
-                            "diff": plain(to_rows),
-                        }
+        delta = owner.delta(note.ref) if owner else None
+        if owner and delta:
+            ctx = {
+                "change": owner.id,
+                "change_title": owner.title,
+                "commit": delta.commit,
+                "kind": delta.kind,
+                "summary": delta.summary,
+                "before": delta.before.to_dict() if delta.before else None,
+                "after": delta.after.to_dict() if delta.after else None,
+                "diff": plain(delta),
+            }
         ctx = ctx or {"stale": True}
     out["context"] = ctx
     return out
 
 
 def _dump_notes(store: Store, only_open: bool) -> None:
-    changes, sources = store.changes(), store.sources()
+    changes = store.changes()
     notes = [n for n in store.notes() if not only_open or n.status == "open"]
-    json.dump([_note_dict(n, changes, sources) for n in notes], sys.stdout, indent=2)
+    json.dump([_note_dict(n, changes) for n in notes], sys.stdout, indent=2)
     print()
 
 
@@ -350,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
     show = sub.add_parser(
         "show",
         parents=[common],
-        help="print a commit's message and its numbered changed lines",
+        help="print a commit's message and its diff with old/new line numbers",
     )
     show.add_argument("source")
     show.add_argument("--json", action="store_true")
